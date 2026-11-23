@@ -172,6 +172,20 @@ async function streamLooksBad(s) {
   });
 }
 
+const BLOCKED_STREAM_PROVIDERS = new Set(
+  String(process.env.STREAM_BLOCKLIST || 'phim4k').split(',').map((x) => x.trim()).filter(Boolean)
+);
+
+async function filterBadStreams(list) {
+  const bad = await Promise.all(
+    list.map((s) => {
+      if (BLOCKED_STREAM_PROVIDERS.has(s._providerId)) return true;
+      return streamLooksBad(s).catch(() => false);
+    })
+  );
+  return list.filter((s, i) => !bad[i]);
+}
+
 // /stream/movie/tt123.json hoặc /stream/series/tt123:1:2.json
 router.get('/stream/:type/:id.json', async (req, res) => {
   const type = req.params.type === 'series' ? 'series' : 'movie';
@@ -182,6 +196,19 @@ router.get('/stream/:type/:id.json', async (req, res) => {
     if (parsed && parsed.provider) {
       // ID có prefix nguồn (kk_..., nc_...) -> lấy trực tiếp, không cần Cinemeta
       streams = await parsed.provider.streamsFromSlug(parsed.slug, type, parsed.season, parsed.episode);
+      streams = await filterBadStreams(streams);
+      if (!streams.length) {
+        try {
+          const d = await parsed.provider.detail(parsed.slug);
+          if (d && d.name) {
+            const others = Object.values(providers).filter((p) => p.id !== parsed.provider.id);
+            const results = await Promise.allSettled(
+              others.map((p) => p.resolveStream({ title: d.name, year: d.year, type, season: parsed.season, episode: parsed.episode }))
+            );
+            for (const r of results) if (r.status === 'fulfilled' && Array.isArray(r.value)) streams.push(...r.value);
+          }
+        } catch { /* bỏ qua fallback */ }
+      }
     } else if (parsed) {
       // IMDb ID -> tra tên phim từ Cinemeta rồi hỏi từng nguồn
       const meta = await cinemeta.getMeta(type, parsed.imdbId);
@@ -207,8 +234,7 @@ router.get('/stream/:type/:id.json', async (req, res) => {
     console.warn('[stream] lỗi:', e.message);
   }
   streams = dedupe(streams.map((s) => wrapProxy(s, base)));
-  const bad = await Promise.all(streams.map((s) => streamLooksBad(s).catch(() => false)));
-  streams = streams.filter((s, i) => !bad[i]);
+  streams = await filterBadStreams(streams);
   res.json({ streams, cacheMaxAge: 600 });
 });
 
