@@ -64,7 +64,7 @@ async function getStreams(tmdbId, mediaType, season, episode) {
           if (k && t.indexOf(k) >= 0) { note = AD_WARN_TITLES[k]; break; }
         }
       }
-      if (note) { s.title = '⚠️ nguồn có chữ: ' + note + ' • ' + s.title; s._warn = 1; }
+      if (note) { s.title = '⚠️ watermark: ' + note + ' • ' + s.title; s._warn = 1; }
     });
     streams.sort(function (a, b) { return (a._warn ? 1 : 0) - (b._warn ? 1 : 0); });
     console.log('VietStream: tong cong ' + streams.length + ' stream');
@@ -237,8 +237,8 @@ function pickEpisode(items, epNum, isMovie) {
 
 function makeStream(provName, referer, movieName, epLabel, audio, quality, url) {
   return {
-    name: 'VietStream · ' + provName,
-    title: [epLabel, audio, quality].filter(Boolean).join(' • ') + (movieName ? ' • ' + movieName : ''),
+    name: provName + ' ' + (quality || 'HD'),
+    title: [audio, epLabel, movieName].filter(Boolean).join(' • '),
     url: url,
     quality: quality || 'HD',
     type: 'hls',
@@ -786,8 +786,8 @@ function hdvnnAudio(text, key) {
 
 function hdvnnMakeStream(movieName, epLabel, audio, quality, url, type) {
   return {
-    name: 'HDVNN · ' + (audio || 'Vietsub'),
-    title: [epLabel, quality, audio].filter(Boolean).join(' • ') + (movieName ? ' • ' + movieName : ''),
+    name: 'HDVNN ' + (quality || 'HD'),
+    title: [audio, epLabel, movieName].filter(Boolean).join(' • '),
     url: url,
     quality: quality || 'HD',
     type: type || 'mp4',

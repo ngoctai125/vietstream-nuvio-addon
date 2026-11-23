@@ -104,8 +104,8 @@ class BaseProvider {
   makeStream({ movieName, epLabel, audio, quality, url, externalUrl, headers }) {
     const q = quality || 'HD';
     const stream = {
-      name: `${this.name}\n${q} · ${audio || 'Vietsub'}`,
-      title: [epLabel, movieName].filter(Boolean).join(' • '),
+      name: `${this.name} ${q}`,
+      title: [audio || 'Vietsub', epLabel, movieName].filter(Boolean).join(' • '),
       behaviorHints: {
         notWebReady: false,
         bingeGroup: `${this.id}-${audioKey(audio || 'vietsub')}`

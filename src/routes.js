@@ -49,7 +49,7 @@ function applyAdScan(list) {
       }
     }
     if (note) {
-      s.title = '⚠️ nguồn có chữ: ' + note + ' • ' + s.title;
+      s.title = '⚠️ watermark: ' + note + ' • ' + s.title;
       s._warn = true;
     }
     out.push(s);
