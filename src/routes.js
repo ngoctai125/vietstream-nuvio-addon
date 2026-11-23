@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { CONFIG, PROVIDERS } = require('./config');
 const cinemeta = require('./cinemeta');
-const { cached, getJson } = require('./utils');
+const { cached, getJson, getText } = require('./utils');
 const { router: hlsRouter, getBaseUrl, b64e } = require('./hls-proxy');
 const { buildManifest, enabledProviders } = require('./manifest');
 
@@ -151,6 +151,27 @@ router.get('/', (req, res) => {
   );
 });
 
+// Lọc stream hỏng / chèn quảng cáo:
+// - externalUrl dạng embed.php/embed/ (không phát được trên TV)
+// - HLS trả JSON lỗi (vsmov "Thiếu signature")
+// - HLS toàn segment .png (playlist giả của Phim4K)
+async function streamLooksBad(s) {
+  if (!s.url) return !!(s.externalUrl && /embed\.php|\/embed\//i.test(s.externalUrl));
+  if (!/\.m3u8(\?|$)/i.test(s.url)) return false;
+  return cached('bad:' + s.url, 5 * 60 * 1000, async () => {
+    const h = (s.behaviorHints && s.behaviorHints.proxyHeaders && s.behaviorHints.proxyHeaders.request) || {};
+    const txt = await getText(s.url, { headers: { ...h, Range: 'bytes=0-40000' }, timeout: 7000 });
+    if (!txt) return false;
+    if (/Thiếu signature|"error"\s*:/.test(txt)) return true;
+    const segs = txt.split(/\r?\n/).map((x) => x.trim()).filter((x) => x && !x.startsWith('#'));
+    if (segs.length >= 3) {
+      const png = segs.filter((x) => /\.png(\?|$)/i.test(x)).length;
+      if (png / segs.length > 0.8 && !/proxy-segment/i.test(txt)) return true;
+    }
+    return false;
+  });
+}
+
 // /stream/movie/tt123.json hoặc /stream/series/tt123:1:2.json
 router.get('/stream/:type/:id.json', async (req, res) => {
   const type = req.params.type === 'series' ? 'series' : 'movie';
@@ -186,6 +207,8 @@ router.get('/stream/:type/:id.json', async (req, res) => {
     console.warn('[stream] lỗi:', e.message);
   }
   streams = dedupe(streams.map((s) => wrapProxy(s, base)));
+  const bad = await Promise.all(streams.map((s) => streamLooksBad(s).catch(() => false)));
+  streams = streams.filter((s, i) => !bad[i]);
   res.json({ streams, cacheMaxAge: 600 });
 });
 
