@@ -28,7 +28,7 @@ const PROVIDERS = {
     cdnImage: process.env.OPHIM_CDN_IMAGE || 'https://img.ophim.live',
     siteUrl: process.env.OPHIM_SITE_URL || 'https://www.ophim.live',
     referer: 'https://www.ophim.live/',
-    enabled: ENABLED_LIST ? ENABLED_LIST.includes('ophim') : true,
+    enabled: ENABLED_LIST ? ENABLED_LIST.includes('ophim') : false,
     proxy: false
   },
   nguonc: {
@@ -50,7 +50,7 @@ const PROVIDERS = {
     apiUrl: process.env.VNSTREAM_API_URL || 'https://egluy2hhb21vaw5ndw9pbmhl.darkbytes.xyz/api/v1',
     siteUrl: process.env.VNSTREAM_SITE_URL || 'https://cobephim.biz',
     referer: 'https://cobephim.biz/',
-    enabled: ENABLED_LIST ? ENABLED_LIST.includes('vnstream') : true,
+    enabled: ENABLED_LIST ? ENABLED_LIST.includes('vnstream') : false,
     proxy: false
   },
   phim4k: {
