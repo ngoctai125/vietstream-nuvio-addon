@@ -34,7 +34,6 @@ async function getStreams(tmdbId, mediaType, season, episode) {
     if (!disabled.ophim) providers.push({ name: 'ophim', fn: ophimStreams });
     if (!disabled.nguonc) providers.push({ name: 'nguonc', fn: nguoncStreams });
     if (!disabled.vnstream) providers.push({ name: 'vnstream', fn: vnstreamStreams });
-    if (!disabled.phim4k) providers.push({ name: 'phim4k', fn: phim4kStreams });
     if (!disabled.hdvnn) providers.push({ name: 'hdvnn', fn: hdvnnStreams });
 
     var results = await Promise.allSettled(
