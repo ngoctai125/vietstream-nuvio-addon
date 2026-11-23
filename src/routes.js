@@ -5,7 +5,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { CONFIG, PROVIDERS } = require('./config');
 const cinemeta = require('./cinemeta');
-const { cached, getJson, getText } = require('./utils');
+const { cached, getJson, getText, normTitle } = require('./utils');
 const { router: hlsRouter, getBaseUrl, b64e } = require('./hls-proxy');
 const { buildManifest, enabledProviders } = require('./manifest');
 
@@ -30,6 +30,31 @@ for (const cfg of enabledProviders()) {
   } catch (e) {
     console.warn(`[init] Không tải được nguồn ${cfg.id}:`, e.message);
   }
+}
+
+const ADSCAN_FILE = path.join(__dirname, '..', 'data', 'adscan.json');
+let ADSCAN = { banUrls: [], warnUrls: {}, warnTitles: {} };
+try { ADSCAN = JSON.parse(fs.readFileSync(ADSCAN_FILE, 'utf8')); } catch { /* chưa có kết quả quét */ }
+
+function applyAdScan(list) {
+  const out = [];
+  for (const s of list) {
+    const url = s.url || '';
+    if ((ADSCAN.banUrls || []).includes(url)) continue;
+    let note = (ADSCAN.warnUrls || {})[url];
+    if (!note) {
+      const t = normTitle(s.title || '');
+      for (const [k, v] of Object.entries(ADSCAN.warnTitles || {})) {
+        if (k && t.includes(k)) { note = v; break; }
+      }
+    }
+    if (note) {
+      s.title = '⚠️ nguồn có chữ: ' + note + ' • ' + s.title;
+      s._warn = true;
+    }
+    out.push(s);
+  }
+  return out.sort((a, b) => (a._warn ? 1 : 0) - (b._warn ? 1 : 0));
 }
 
 const router = express.Router();
@@ -233,6 +258,7 @@ router.get('/stream/:type/:id.json', async (req, res) => {
   } catch (e) {
     console.warn('[stream] lỗi:', e.message);
   }
+  streams = applyAdScan(streams);
   streams = dedupe(streams.map((s) => wrapProxy(s, base)));
   streams = await filterBadStreams(streams);
   res.json({ streams, cacheMaxAge: 600 });

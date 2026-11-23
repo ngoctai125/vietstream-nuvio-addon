@@ -55,6 +55,18 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       seen[s.url] = true;
       return true;
     });
+    streams = streams.filter(function (s) { return AD_BAN_URLS.indexOf(s.url) < 0; });
+    streams.forEach(function (s) {
+      var note = AD_WARN_URLS[s.url];
+      if (!note) {
+        var t = normTitle(s.title || '');
+        for (var k in AD_WARN_TITLES) {
+          if (k && t.indexOf(k) >= 0) { note = AD_WARN_TITLES[k]; break; }
+        }
+      }
+      if (note) { s.title = '⚠️ nguồn có chữ: ' + note + ' • ' + s.title; s._warn = 1; }
+    });
+    streams.sort(function (a, b) { return (a._warn ? 1 : 0) - (b._warn ? 1 : 0); });
     console.log('VietStream: tong cong ' + streams.length + ' stream');
   } catch (e) {
     console.error('VietStream getStreams error: ' + (e && e.message));
@@ -745,6 +757,9 @@ async function tophimStreams(info, type, season, episode) {
 /* ---------------- Nguồn: HDVNN (hdvnn.xyz) ---------------- */
 
 var HDVNN_BASE = 'https://hdvnn.xyz';
+var AD_BAN_URLS = [];
+var AD_WARN_URLS = {"https://lh3.googleusercontent.com/pw/AP1GczMU6niiRFygxJ6tN4Ov3qrFWyJZMPBXcDTda2wS9YnWvD9gjPJYJD84oOP7MaqGmXFuh9W8_cwuAY6np3-AkcaM1_7NqPql-1eq-FRwuFb5Dfa74oXU=m37":"bit.ly","https://lh3.googleusercontent.com/pw/AP1GczOYwdlm5hR0SJAzlGSANnE0jYayUBcuzyt2dbsWmpaPfd69K8JMk-cpPFuRbi98ERMHDn4VfrDs1F71nVhMlXj4fmk4pfRWkuQjuQU4eu7O5NTfGXPn=m37":"hdvnn","https://lh3.googleusercontent.com/pw/AP1GczNbCYh4HuGDTJrTnRhEAnpCm95lrgsRsUiOu7_NCymJqwVhF87I4j3jiVSvi3nq8S4Nf0CPy56PqWx8BO7j8IZBN1MMxPtskj_uFduJzWbVnHVn_-Yw=m37":"hdvnn","https://lh3.googleusercontent.com/pw/AP1GczPfoyUpxL0hUPeVI_3PUOe2c8GxrvQhttaJM4XL0kWSutaEbPbhS1MhFzAjgsO03e5ruYVlw7aV2DCk_NV-MH8FRgxaIQl2GnRfYqk_HQvKINYFwk9X=m37":"yanhh3d"};
+var AD_WARN_TITLES = {"dau pha thuong khung ova: song de chi chien":"bit.ly","trang trai heartland":"hdvnn","han chien 1994":"hdvnn","dai luc linh vo":"yanhh3d"};
 
 function hdvnnQuality(url) {
   var m = String(url).match(/=m(\d+)(?:$|[?&])/);
