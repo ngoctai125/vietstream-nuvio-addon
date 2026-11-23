@@ -56,6 +56,10 @@ def norm(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
+def title_key(s):
+    return re.sub(r"[^a-z0-9]+", " ", norm(s)).strip()
+
+
 def http_json(url):
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=40) as r:
@@ -156,7 +160,7 @@ def main():
     # aggregate
     ban_urls = sorted({x["url"] for x in items if x["level"] == "ban"})
     warn_urls = {x["url"]: x["note"] for x in items if x["level"] == "warn"}
-    warn_titles = {norm(x["title"]): x["note"] for x in items if x["level"] == "warn" and x.get("title")}
+    warn_titles = {title_key(x["title"]): x["note"] for x in items if x["level"] == "warn" and x.get("title")}
     report = {"generatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "base": BASE, "limit": LIMIT, "items": items,
               "banUrls": ban_urls, "warnUrls": warn_urls, "warnTitles": warn_titles}
     here = os.path.dirname(os.path.abspath(__file__))
