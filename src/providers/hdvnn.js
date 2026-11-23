@@ -13,7 +13,6 @@ const { CONFIG } = require('../config');
 //   Player VNN nhúng link Google Photos dạng base64 -> tải thẳng MP4 từ Google.
 
 const UA = CONFIG.userAgent;
-const BAD_SLUGS = new Set(String(process.env.HDVNN_BAD_SLUGS || 'dau-pha-thuong-khung-ova-song-de-chi-chien').split(',').map((x) => x.trim()).filter(Boolean));
 
 function cleanText(s) {
   return String(s || '').replace(/\s+/g, ' ').trim();
@@ -260,7 +259,6 @@ class HdvnnProvider extends BaseProvider {
   }
 
   async streamsFromSlug(slug, type, season, episode) {
-    if (BAD_SLUGS.has(slug)) return [];
     const d = await this.detail(slug);
     if (!d) return [];
     const isMovie = d.type !== 'series';

@@ -745,7 +745,6 @@ async function tophimStreams(info, type, season, episode) {
 /* ---------------- Nguồn: HDVNN (hdvnn.xyz) ---------------- */
 
 var HDVNN_BASE = 'https://hdvnn.xyz';
-var HDVNN_BAD = ['dau-pha-thuong-khung-ova-song-de-chi-chien'];
 
 function hdvnnQuality(url) {
   var m = String(url).match(/=m(\d+)(?:$|[?&])/);
