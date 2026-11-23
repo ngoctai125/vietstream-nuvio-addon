@@ -261,6 +261,15 @@ router.get('/stream/:type/:id.json', async (req, res) => {
   streams = applyAdScan(streams);
   streams = dedupe(streams.map((s) => wrapProxy(s, base)));
   streams = await filterBadStreams(streams);
+  const qrank = (x) => {
+    const t = String((x.name || '') + ' ' + (x.title || ''));
+    if (/4k|2160/i.test(t)) return 4;
+    if (/1080|fhd/i.test(t)) return 3;
+    if (/720/i.test(t)) return 2;
+    if (/360|480/i.test(t)) return 1;
+    return 0;
+  };
+  streams.sort((a, b) => qrank(b) - qrank(a));
   res.json({ streams, cacheMaxAge: 600 });
 });
 
