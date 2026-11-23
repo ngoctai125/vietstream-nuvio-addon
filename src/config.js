@@ -121,7 +121,7 @@ const CONFIG = {
   proxyProviders: csv('PROXY_PROVIDERS', ['nguonc']),
   manifest: {
     id: 'community.vietstream',
-    version: process.env.VERSION || '1.2.1',
+    version: process.env.VERSION || '1.3.0',
     name: 'VietStream · Phim Việt',
     description:
       'Xem phim Việt đa nguồn: KKphim, K20, HDVNN, OPhim, NguonC, Phim4K, VnStream — Vietsub, Lồng tiếng, Thuyết minh. Tương thích Nuvio & Stremio.'

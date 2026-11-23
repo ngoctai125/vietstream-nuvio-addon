@@ -8,6 +8,7 @@ const cinemeta = require('./cinemeta');
 const { cached, getJson, getText, normTitle } = require('./utils');
 const { router: hlsRouter, getBaseUrl, b64e } = require('./hls-proxy');
 const { buildManifest, enabledProviders } = require('./manifest');
+const aggregate = require('./aggregate');
 
 // ---------- Khởi tạo provider ----------
 const CTORS = {
@@ -288,6 +289,16 @@ router.get('/catalog/:type/:id/:extra', (req, res) => {
 });
 
 async function catalogSend(req, res) {
+  const type0 = req.params.type === 'series' ? 'series' : 'movie';
+  const cid0 = String(req._catalogId || '').replace(/.json$/i, '');
+  if (cid0.indexOf('agg-') === 0) {
+    const aggKind = cid0.slice(4);
+    const ex = req._extra || {};
+    const aggKey = `agg:${aggKind}:${type0}:${ex.search || ''}|${ex.skip || 0}`;
+    const aggMetas = await cached(aggKey, 10 * 60 * 1000, () => aggregate.listCatalog(aggKind, ex));
+    const aggFiltered = (aggMetas || []).filter((m) => m && m.id).filter((m) => !m.type || m.type === type0);
+    return res.json({ metas: aggFiltered, cacheMaxAge: 600 });
+  }
   const type = req.params.type === 'series' ? 'series' : 'movie';
   const catalogId = String(req._catalogId || '').replace(/\.json$/i, '');
   const dash = catalogId.indexOf('-');
