@@ -5,10 +5,14 @@ const { getJson, getText, stripHtml, mapImageUrl, cached, parseEpNum } = require
 
 // Nguồn NguonC — API công khai https://phim.nguonc.com/api
 // Một số phim trả m3u8 trực tiếp, một số chỉ có link embed StreamC
-// -> dùng bộ giải mã data-obf / Dean Edwards / regex m3u8, hoặc trả externalUrl.
+// -> dùng bộ giải mã data-obf / Dean Edwards / regex m3u8, hoặc endpoint HLS cùng hash;
+//    không giải được thì bỏ stream, không đưa link embed lên làm link phát.
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+// Endpoint HLS của K20 nhận cùng hash embed.php + host embed (tham số eh).
+const HLS_BY_HASH = 'https://sc.k-20.xyz/nguonc-hls.m3u8';
 
 function isSeriesItem(it) {
   return (
@@ -163,12 +167,48 @@ class NguoncProvider extends BaseProvider {
     return null;
   }
 
-  async extractStreamItem(ep) {
+  // embed.php bị Guard chặn -> thử host/đường dẫn khác cùng hash (K20)
+  variantFromEmbed(embedUrl) {
+    try {
+      const u = new URL(embedUrl);
+      const hash = u.searchParams.get('hash');
+      if (!hash || !/^[a-f0-9]{32}$/i.test(hash)) return null;
+      return { url: `${HLS_BY_HASH}?hash=${hash}&eh=${u.host}`, referer: `${u.origin}/`, hash };
+    } catch { return null; }
+  }
+
+  // Chỉ đọc đoạn đầu playlist: K20 trả ~780 KB và bỏ qua header Range.
+  async isHlsPlaylist(url) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 6000);
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': UA }, signal: ctrl.signal });
+      if (!res.ok || !res.body) return false;
+      const reader = res.body.getReader();
+      const { value } = await reader.read();
+      reader.cancel().catch(() => {});
+      return Buffer.from(value || []).toString('utf8').startsWith('#EXTM3U');
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async extractStreamItem(ep, slug) {
     if (ep.m3u8) return { url: ep.m3u8 };
     if (ep.embed) {
       const extracted = await this.extractStreamC(ep.embed);
       if (extracted) return { url: extracted.m3u8, headers: { 'User-Agent': UA, Referer: extracted.referer } };
-      return { externalUrl: ep.embed };
+
+      const alt = this.variantFromEmbed(ep.embed);
+      if (alt && await this.isHlsPlaylist(alt.url)) {
+        return { url: alt.url, headers: { 'User-Agent': UA, Referer: alt.referer } };
+      }
+
+      const hash = (alt && alt.hash) || (String(ep.embed).match(/[?&]hash=([a-f0-9]{32})/i) || [])[1] || null;
+      console.warn(`[nguonc] không giải được embed${slug ? ` slug=${slug}` : ''}${hash ? ` hash=${hash}` : ''}`);
+      return null;
     }
     return null;
   }
@@ -180,7 +220,7 @@ class NguoncProvider extends BaseProvider {
     for (const server of d.servers || []) {
       const ep = this.pickEpisode(server.items, epNum, isMovie);
       if (!ep) continue;
-      const src = await this.extractStreamItem(ep); // tuần tự: ít request song song
+      const src = await this.extractStreamItem(ep, d.slug); // tuần tự: ít request song song
       if (!src) continue;
       const audio = require('../utils').detectAudio(server.serverName, require('../utils').detectAudio(d.lang, 'Vietsub'));
       streams.push(

@@ -152,7 +152,7 @@ test('Xem20 provider logs in once, selects exact season/episode variants and res
   assert.equal(hits.length, 1);
   const streams = await provider.streamsFromSlug(hits[0].slug, 'series', 2, 3);
   assert.equal(streams.length, 2);
-  assert.ok(streams.some((stream) => stream.name.includes('Thuyết Minh')));
+  assert.ok(streams.some((stream) => stream.title.includes('Thuyết Minh')));
   assert.ok(streams.some((stream) => stream.name.includes('4K')));
   assert.ok(streams.every((stream) => stream.behaviorHints.notWebReady));
   assert.equal(calls.filter((call) => call.url.endsWith('/login') && call.method === 'POST').length, 1);

@@ -94,6 +94,14 @@ function rank(q) {
   return 1;
 }
 
+function normalizeQuality(q) {
+  const s = String(q || '');
+  if (/2160|4k/i.test(s)) return '4K';
+  if (/fhd|1080/i.test(s)) return 'FHD';
+  if (/hd|720/i.test(s)) return 'HD';
+  return null;
+}
+
 function toMeta(it) {
   return {
     id: it.imdbId,
@@ -102,7 +110,7 @@ function toMeta(it) {
     poster: it.poster,
     posterShape: 'poster',
     background: it.background || it.poster,
-    releaseInfo: [it.quality, it.lang, it.year].filter(Boolean).join(' · ') || undefined,
+    releaseInfo: [normalizeQuality(it.quality), it.lang, it.year].filter(Boolean).join(' · ') || undefined,
     year: it.year || undefined,
     imdbId: it.imdbId
   };

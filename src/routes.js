@@ -181,20 +181,57 @@ router.get('/', (req, res) => {
 // - externalUrl dạng embed.php/embed/ (không phát được trên TV)
 // - HLS trả JSON lỗi (vsmov "Thiếu signature")
 // - HLS toàn segment .png (playlist giả của Phim4K)
+const BAD_BODY_RE = /Thiếu signature|"error"\s*:|Could not resolve embed|Segment fetch failed/i;
+
+// Đọc playlist/segment kèm HTTP status: 5xx hoặc timeout (status 0) đều là hỏng.
+async function probeUrlText(url, headers) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10000);
+  try {
+    const res = await fetch(url, {
+      redirect: 'follow',
+      headers: { 'User-Agent': CONFIG.userAgent, ...headers, Range: 'bytes=0-40000' },
+      signal: ctrl.signal
+    });
+    return { status: res.status, txt: await res.text() };
+  } catch {
+    return { status: 0, txt: '' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function streamLooksBad(s) {
-  if (!s.url) return !!(s.externalUrl && /embed\.php|\/embed\//i.test(s.externalUrl));
-  if (!/\.m3u8(\?|$)/i.test(s.url)) return false;
+  if (!s.url) return {
+    bad: !!(s.externalUrl && /embed\.php|\/embed\//i.test(s.externalUrl)),
+    probeOk: false,
+    latencyMs: Infinity
+  };
+  if (!/\.m3u8(\?|$)/i.test(s.url)) return { bad: false, probeOk: null, latencyMs: Infinity };
   return cached('bad:' + s.url, 5 * 60 * 1000, async () => {
     const h = (s.behaviorHints && s.behaviorHints.proxyHeaders && s.behaviorHints.proxyHeaders.request) || {};
-    const txt = await getText(s.url, { headers: { ...h, Range: 'bytes=0-40000' }, timeout: 7000 });
-    if (!txt) return false;
-    if (/Thiếu signature|"error"\s*:/.test(txt)) return true;
+    const t0 = Date.now();
+    const { status, txt } = await probeUrlText(s.url, h);
+    const latencyMs = Date.now() - t0;
+    if (status >= 500 || !txt) return { bad: true, probeOk: false, latencyMs };
+    if (BAD_BODY_RE.test(txt)) return { bad: true, probeOk: false, latencyMs };
     const segs = txt.split(/\r?\n/).map((x) => x.trim()).filter((x) => x && !x.startsWith('#'));
     if (segs.length >= 3) {
       const png = segs.filter((x) => /\.png(\?|$)/i.test(x)).length;
-      if (png / segs.length > 0.8 && !/proxy-segment/i.test(txt)) return true;
+      if (png / segs.length > 0.8) return { bad: true, probeOk: false, latencyMs };
     }
-    return false;
+    // Playlist dạng proxy-segment: thử thêm đoạn đầu; lỗi ở đây cũng là stream hỏng.
+    if (/proxy-segment/i.test(txt) && segs.length) {
+      let first = null;
+      try { first = new URL(segs[0], s.url).href; } catch { /* bỏ qua segment lạ */ }
+      if (first) {
+        const seg = await probeUrlText(first, h);
+        if (seg.status >= 500 || !seg.txt || BAD_BODY_RE.test(seg.txt)) {
+          return { bad: true, probeOk: false, latencyMs };
+        }
+      }
+    }
+    return { bad: false, probeOk: status > 0 && status < 500, latencyMs };
   });
 }
 
@@ -203,13 +240,59 @@ const BLOCKED_STREAM_PROVIDERS = new Set(
 );
 
 async function filterBadStreams(list) {
-  const bad = await Promise.all(
+  const probes = await Promise.all(
     list.map((s) => {
-      if (BLOCKED_STREAM_PROVIDERS.has(s._providerId)) return true;
-      return streamLooksBad(s).catch(() => false);
+      if (BLOCKED_STREAM_PROVIDERS.has(s._providerId)) return { bad: true, probeOk: false, latencyMs: Infinity };
+      return streamLooksBad(s).catch(() => ({ bad: false, probeOk: false, latencyMs: Infinity }));
     })
   );
-  return list.filter((s, i) => !bad[i]);
+  const out = [];
+  list.forEach((s, i) => {
+    const r = probes[i] || {};
+    if (r.bad) return;
+    // Tag chỉ dùng để sort; để non-enumerable nên JSON /stream không đổi.
+    Object.defineProperties(s, {
+      _probeOk: { value: !!r.probeOk, enumerable: false, configurable: true, writable: true },
+      _latencyMs: { value: Number.isFinite(r.latencyMs) ? r.latencyMs : Infinity, enumerable: false, configurable: true, writable: true }
+    });
+    out.push(s);
+  });
+  return out;
+}
+
+// Tìm item cùng IMDb trong 6 catalog agg (cache dùng chung với /catalog),
+// rồi tới provider.search — nguồn title/year dự phòng khi Cinemeta thiếu.
+async function imdbFallback(type, imdbId) {
+  if (!imdbId || !/^tt\d+$/.test(imdbId)) return null;
+  const want = String(imdbId).toLowerCase();
+  const kinds = Object.keys(aggregate.SRC || {});
+  const agg = await Promise.allSettled(
+    kinds.map((k) => cached('agg:' + k + ':' + type + ':|0', 10 * 60 * 1000, () => aggregate.listCatalog(k, {})))
+  );
+  for (const r of agg) {
+    if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
+    const hit = r.value.find((m) => m && m.imdbId && String(m.imdbId).toLowerCase() === want);
+    if (hit && (hit.name || hit.originalName)) return hit;
+  }
+  const searched = await Promise.allSettled(
+    Object.values(providers).map((p) => Promise.resolve().then(() => p.search(imdbId)))
+  );
+  for (const r of searched) {
+    if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
+    const hit = r.value.find((h) => h && h.imdbId && String(h.imdbId).toLowerCase() === want && (h.name || h.originalName));
+    if (!hit) continue;
+    return {
+      imdbId,
+      name: hit.name || hit.originalName,
+      originalName: hit.originalName || hit.name,
+      year: parseInt(hit.year, 10) || null,
+      type,
+      poster: hit.poster,
+      background: hit.background || hit.poster,
+      releaseInfo: hit.releaseInfo
+    };
+  }
+  return null;
 }
 
 // /stream/movie/tt123.json hoặc /stream/series/tt123:1:2.json
@@ -236,15 +319,16 @@ router.get('/stream/:type/:id.json', async (req, res) => {
         } catch { /* bỏ qua fallback */ }
       }
     } else if (parsed) {
-      // IMDb ID -> tra tên phim từ Cinemeta rồi hỏi từng nguồn
+      // IMDb ID -> Cinemeta trước; thiếu tên hoặc không ra stream thì lấy
+      // title/year dự phòng từ 6 catalog agg / provider.search rồi vẫn gọi resolveStream.
       const meta = await cinemeta.getMeta(type, parsed.imdbId);
-      if (meta) {
+      const ask = async (name, year) => {
         const results = await Promise.allSettled(
           Object.values(providers).map((p) =>
             p.resolveStream({
               imdbId: parsed.imdbId,
-              title: meta.name,
-              year: meta.year,
+              title: name,
+              year,
               type,
               season: parsed.season,
               episode: parsed.episode
@@ -254,6 +338,12 @@ router.get('/stream/:type/:id.json', async (req, res) => {
         for (const r of results) {
           if (r.status === 'fulfilled' && Array.isArray(r.value)) streams.push(...r.value);
         }
+      };
+      if (meta && meta.name) await ask(meta.name, meta.year);
+      if (!streams.length) {
+        const fb = await imdbFallback(type, parsed.imdbId);
+        if (fb && (fb.name || fb.originalName)) await ask(fb.name || fb.originalName, fb.year);
+        else if (!meta || !meta.name) await ask(parsed.imdbId, null);
       }
     }
   } catch (e) {
@@ -270,7 +360,13 @@ router.get('/stream/:type/:id.json', async (req, res) => {
     if (/360|480/i.test(t)) return 1;
     return 0;
   };
-  streams.sort((a, b) => qrank(b) - qrank(a));
+  const latency = (x) => Number.isFinite(x._latencyMs) ? x._latencyMs : Number.MAX_SAFE_INTEGER;
+  const probeRank = (x) => x._probeOk === false ? 2 : x._probeOk === true ? 0 : 1;
+  streams.sort((a, b) =>
+    probeRank(a) - probeRank(b) ||
+    latency(a) - latency(b) ||
+    qrank(b) - qrank(a)
+  );
   res.json({ streams, cacheMaxAge: 600 });
 });
 
@@ -339,6 +435,22 @@ router.get('/meta/:type/:id.json', async (req, res) => {
     getJson(`${CONFIG.cinemetaUrl}/meta/${type}/${parsed.imdbId}.json`)
   );
   if (raw && raw.meta) return res.json({ meta: raw.meta, cacheMaxAge: 1800 });
+  // Dự phòng trước khi 404: item cùng IMDb trong 6 catalog agg / provider.search.
+  const fb = await imdbFallback(type, parsed.imdbId);
+  if (fb) {
+    const meta = {
+      id: parsed.imdbId,
+      imdb_id: parsed.imdbId,
+      type,
+      name: fb.name || fb.originalName,
+      poster: fb.poster,
+      posterShape: 'poster',
+      background: fb.background || fb.poster,
+      releaseInfo: fb.releaseInfo,
+      year: fb.year
+    };
+    return res.json({ meta, cacheMaxAge: 1800 });
+  }
   res.status(404).json({ err: 'not found' });
 });
 

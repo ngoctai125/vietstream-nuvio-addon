@@ -66,12 +66,86 @@ async function getStreams(tmdbId, mediaType, season, episode) {
       }
       if (note) { s.title = '⚠️ watermark: ' + note + ' • ' + s.title; s._warn = 1; }
     });
-    streams.sort(function (a, b) { return (a._warn ? 1 : 0) - (b._warn ? 1 : 0); });
+    // Probe song song từng URL (Range nhỏ) -> _probeOk/_latencyMs, nằm trong ngân sách 60s của QuickJS.
+    await Promise.allSettled(
+      streams.map(function (s) {
+        return probeStream(s).catch(function () {
+          s._probeOk = false;
+          s._latencyMs = 1e9;
+        });
+      })
+    );
+
+    // Xếp hạng: probe OK -> chưa probe -> probe hỏng, rồi latency -> watermark -> quality.
+    streams.sort(function (a, b) {
+      var pa = probeRank(a), pb = probeRank(b);
+      if (pa !== pb) return pa - pb;
+      var la = a._probeOk === true && a._latencyMs != null ? a._latencyMs : 1e9;
+      var lb = b._probeOk === true && b._latencyMs != null ? b._latencyMs : 1e9;
+      if (la !== lb) return la - lb;
+      var wa = a._warn ? 1 : 0, wb = b._warn ? 1 : 0;
+      if (wa !== wb) return wa - wb;
+      return streamQualityRank(b.quality) - streamQualityRank(a.quality);
+    });
     console.log('VietStream: tong cong ' + streams.length + ' stream');
   } catch (e) {
     console.error('VietStream getStreams error: ' + (e && e.message));
   }
   return streams;
+}
+
+/* ---------------- Probe stream: kiểm tra URL sống + đo latency ---------------- */
+// QuickJS: dùng fetch + Date.now(), KHÔNG Buffer/setTimeout. Mỗi probe có signal 8s nếu runtime hỗ trợ.
+async function probeStream(s) {
+  var url = s && s.url;
+  if (!url || !/^https?:\/\//i.test(url)) {
+    s._probeOk = false;
+    s._latencyMs = 1e9;
+    return s;
+  }
+  var headers = { Range: 'bytes=0-1023' };
+  // lh3.googleusercontent.com: KHÔNG gắn Referer/UA (tránh 403 như lần đo thêm -e https://hdvnn.xyz/)
+  if (!/lh3\.googleusercontent\.com/i.test(url)) {
+    var req = s.behaviorHints && s.behaviorHints.proxyHeaders && s.behaviorHints.proxyHeaders.request;
+    var src = (req && req.headers) || s.headers || {};
+    headers['User-Agent'] = src['User-Agent'] || UA;
+    if (src.Referer) headers.Referer = src.Referer;
+  }
+  var opts = { method: 'GET', headers: headers };
+  // QuickJS có thể thiếu AbortSignal.timeout: KHÔNG fetch không có timeout (treo 60s).
+  // Đánh dấu "chưa probe" để sort không đẩy stream sống xuống cuối.
+  if (typeof AbortSignal === 'undefined' || typeof AbortSignal.timeout !== 'function') {
+    s._probeOk = null;
+    s._latencyMs = 1e9;
+    return s;
+  }
+  opts.signal = AbortSignal.timeout(8000);
+  var start = Date.now();
+  try {
+    var res = await fetch(url, opts);
+    s._latencyMs = Date.now() - start;
+    s._probeOk = !!(res && (res.ok || (res.status >= 200 && res.status < 400)));
+    try { if (res && res.body && typeof res.body.cancel === 'function') res.body.cancel(); } catch (e) {}
+  } catch (e) {
+    s._latencyMs = Date.now() - start;
+    s._probeOk = false;
+  }
+  return s;
+}
+
+function probeRank(s) {
+  if (s && s._probeOk === false) return 2;
+  if (s && s._probeOk === true) return 0;
+  return 1; // chưa probe / không rõ: giữ vị trí, không đẩy xuống cuối
+}
+
+function streamQualityRank(q) {
+  var s = String(q || '');
+  if (/2160|4k/i.test(s)) return 5;
+  if (/1080/i.test(s)) return 4;
+  if (/720/i.test(s)) return 3;
+  if (/360/i.test(s)) return 2;
+  return 1;
 }
 
 /* ---------------- TMDB: tmdbId -> tên phim + năm ---------------- */

@@ -124,7 +124,7 @@ const CONFIG = {
     version: process.env.VERSION || '1.3.0',
     name: 'VietStream · Phim Việt',
     description:
-      'Xem phim Việt đa nguồn: KKphim, K20, HDVNN, OPhim, NguonC, Phim4K, VnStream — Vietsub, Lồng tiếng, Thuyết minh. Tương thích Nuvio & Stremio.'
+      'Xem phim Việt với 6 danh mục gộp: Phim lẻ, Phim bộ, Chiếu rạp, Hoạt hình, Thuyết Minh, Lồng Tiếng. Tương thích Nuvio & Stremio.'
   }
 };
 

@@ -1,10 +1,17 @@
 'use strict';
 
 const BaseProvider = require('./base');
-const { cached, detectAudio, parseEpNum, qualityFromText } = require('../utils');
+const utils = require('../utils');
+const { cached, detectAudio, parseEpNum, qualityFromText } = utils;
 const { CONFIG } = require('../config');
 
 const K20_SOURCES = ['nguonc', 'hh3d', 'stp', 'vsmov', 'yan'];
+
+// Probe đoạn đầu của playlist .m3u8 để loại link K20 chết trước khi /stream quảng bá.
+const SEGMENT_PROBE_TIMEOUT = 5000;
+const SEGMENT_PROBE_RANGE = 'bytes=0-2047';
+const SEGMENT_PROBE_TTL = 5 * 60 * 1000;
+const segmentProbeCache = new Map(); // url -> { alive, at }
 
 function encodeNativeId(type, id) {
   return Buffer.from(JSON.stringify({ type, id }), 'utf8').toString('base64url');
@@ -201,6 +208,46 @@ class K20Provider extends BaseProvider {
     return match && match.id ? String(match.id) : null;
   }
 
+  // Lấy dòng segment đầu của playlist (bỏ dòng #) rồi probe ngắn hạn bằng getText.
+  // getText trả null cho HTTP 403/502 -> coi là chết; body báo lỗi cũng là chết.
+  // Kết quả cache theo URL để không probe lại mỗi request.
+  async probeStream(url) {
+    if (!url || typeof url !== 'string') return true;
+    const now = Date.now();
+    const hit = segmentProbeCache.get(url);
+    if (hit && now - hit.at < SEGMENT_PROBE_TTL) return hit.alive;
+
+    let alive = true;
+    try {
+      // fetch trực tiếp để phân biệt HTTP 403/502 (chết) với lỗi mạng tạm thời.
+      const res = await utils.fetchWithTimeout(url, { headers: this.headers }, SEGMENT_PROBE_TIMEOUT);
+      if (res && !res.ok && res.status >= 400) {
+        alive = false;
+      } else {
+        const playlist = res ? await res.text() : null;
+        const segment = String(playlist || '')
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .find((line) => line && !line.startsWith('#') && /^https?:\/\//i.test(line));
+        if (segment) {
+          const probe = await utils.getText(segment, {
+            headers: { ...this.headers, Range: SEGMENT_PROBE_RANGE },
+            timeout: SEGMENT_PROBE_TIMEOUT
+          });
+          if (probe == null || /Segment fetch failed|Could not resolve embed/i.test(probe)) alive = false;
+        }
+      }
+    } catch {
+      // Lỗi mạng -> giữ stream, không đánh dấu chết vĩnh viễn.
+    }
+    segmentProbeCache.set(url, { alive, at: Date.now() });
+    if (segmentProbeCache.size > 800) {
+      const oldest = segmentProbeCache.keys().next().value;
+      if (oldest !== undefined) segmentProbeCache.delete(oldest);
+    }
+    return alive;
+  }
+
   mapStream(stream, detail, episode) {
     if (!stream || !stream.url) return null;
     const label = `${stream.name || ''} ${stream.title || ''}`;
@@ -227,7 +274,12 @@ class K20Provider extends BaseProvider {
     const data = await this.request(
       `${this.cfg.apiUrl}/stream/${detail.type}/${encodeURIComponent(nativeVideoId)}.json`
     );
-    return ((data && data.streams) || [])
+    const rawStreams = ((data && data.streams) || []).filter((stream) => stream && stream.url);
+    const alive = await Promise.all(
+      rawStreams.map((stream) => /\.m3u8(\?|$)/i.test(stream.url) ? this.probeStream(stream.url) : true)
+    );
+    return rawStreams
+      .filter((stream, index) => alive[index])
       .map((stream) => this.mapStream(stream, detail, episode))
       .filter(Boolean);
   }
