@@ -52,7 +52,9 @@ function buildManifest(baseUrl) {
     resources: [
       { name: 'catalog', types: ['movie', 'series'], idPrefixes: ['agg-'] },
       { name: 'meta', types: ['movie', 'series'], idPrefixes: ['tt', ...prefixes] },
-      { name: 'stream', types: ['movie', 'series'], idPrefixes: ['tt', ...prefixes] }
+      { name: 'stream', types: ['movie', 'series'], idPrefixes: ['tt', ...prefixes] },
+      // Phụ đề Việt: giữ track gốc OpenSubtitles v3 + thêm track dịch bám timeline.
+      { name: 'subtitles', types: ['movie', 'series'], idPrefixes: ['tt'] }
     ],
     types: ['movie', 'series'],
     catalogs,

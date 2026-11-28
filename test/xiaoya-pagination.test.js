@@ -81,11 +81,11 @@ test('Xiaoya failed page is retried instead of cached as a positive page', async
   }
 });
 
-test('Xiaoya manifest catalog names are Vietnamese and version is 1.4.4', () => {
+test('Xiaoya manifest catalog names are Vietnamese and version is 1.5.0', () => {
   assert.deepEqual(PROVIDERS.xiaoya.catalogs.map((catalog) => catalog.name), [
     'Xiaoya 4K', 'Xiaoya 4K', 'Xiaoya Dolby Vision'
   ]);
-  assert.equal(CONFIG.manifest.version, '1.4.4');
+  assert.equal(CONFIG.manifest.version, '1.5.0');
   const previous = PROVIDERS.xiaoya.enabled;
   PROVIDERS.xiaoya.enabled = true;
   try {

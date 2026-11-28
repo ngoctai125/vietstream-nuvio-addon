@@ -7,6 +7,7 @@ const { CONFIG, PROVIDERS } = require('./config');
 const cinemeta = require('./cinemeta');
 const { cached, cachedOutcome, getJson, getText, normTitle, qualityRank, qualityFromHlsText, parseHlsVariants, isFakeImagePlaylist, normalizeQuality, classifyFetchError, isHdrOrTenBit } = require('./utils');
 const { router: hlsRouter, getBaseUrl, b64e } = require('./hls-proxy');
+const subtitles = require('./subtitles');
 const { buildManifest, enabledProviders } = require('./manifest');
 const aggregate = require('./aggregate');
 const { recordStreamQuality, overlayStreamQuality } = require('./stream-quality');
@@ -67,6 +68,35 @@ function applyAdScan(list) {
 
 const router = express.Router();
 router.use(hlsRouter);
+
+// ---------- Phụ đề Việt ----------
+// Danh sách phụ đề của một phim/tập: giữ track gốc từ OpenSubtitles v3 và thêm track
+// tiếng Việt (dịch bám timeline) khi nguồn không có bản Việt.
+router.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json'], async (req, res) => {
+  const type = req.params.type === 'series' ? 'series' : 'movie';
+  const id = String(req.params.id || '');
+  const extra = String(req.params.extra || '');
+  try {
+    const subs = await subtitles.listSubtitles(type, id, extra, getBaseUrl(req));
+    res.json({ subtitles: subs, cacheMaxAge: 1800 });
+  } catch (e) {
+    console.warn('[subtitles] lỗi:', e.message);
+    res.json({ subtitles: [] });
+  }
+});
+
+// File .srt đã dịch; key = base64url của URL phụ đề gốc (stateless qua restart).
+router.get('/subvi/:key.srt', async (req, res) => {
+  try {
+    const srt = await subtitles.srtByKey(req.params.key);
+    res.set('Content-Type', 'application/x-subrip; charset=utf-8');
+    res.set('Cache-Control', 'public, max-age=43200');
+    res.send(srt);
+  } catch (e) {
+    console.warn('[subvi] lỗi:', e.message);
+    res.status(404).send('');
+  }
+});
 
 // ---------- Helpers ----------
 
