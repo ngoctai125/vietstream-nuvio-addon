@@ -505,6 +505,26 @@ async function enrichTorrentStreams(parsed, type) {
   return { results, detail };
 }
 
+// Điểm IMDb cho lưới "Xem tất cả": catalog agg trả item id tt… nhưng không kèm
+// imdbRating, nên bổ sung từ Cinemeta (cache 6 giờ) để app vẽ badge IMDb.
+// Chạy theo lô 8 để không dội 20 request cùng lúc vào Cinemeta.
+async function enrichImdbRatings(metas, type) {
+  const list = Array.isArray(metas) ? metas : [];
+  const pending = list.filter((m) => m && /^tt\d+$/.test(String(m.id)) && m.imdbRating == null);
+  const CHUNK = 8;
+  for (let i = 0; i < pending.length; i += CHUNK) {
+    await Promise.all(pending.slice(i, i + CHUNK).map(async (m) => {
+      try {
+        const raw = await cached(`imdbRating:${m.id}`, 6 * 3600 * 1000, () =>
+          getJson(`${CONFIG.cinemetaUrl}/meta/${type}/${m.id}.json`));
+        const rating = raw && raw.meta && raw.meta.imdbRating;
+        if (rating) m.imdbRating = String(rating);
+      } catch { /* thiếu rating thì thôi, không chặn catalog */ }
+    }));
+  }
+  return list;
+}
+
 // /stream/movie/tt123.json hoặc /stream/series/tt123:1:2.json
 router.get('/stream/:type/:id.json', async (req, res) => {
   const type = req.params.type === 'series' ? 'series' : 'movie';
@@ -643,6 +663,7 @@ async function catalogSend(req, res) {
     // agg-4k đã được kiểm chứng 2160p lúc sinh dữ liệu, nên giữ nguyên nhãn 4K;
     // overlay thường sẽ bỏ quality chưa có entry /stream và làm mất badge.
     const aggFiltered = aggKind === '4k' ? cleanMetas : overlayStreamQuality(cleanMetas, type0);
+    await enrichImdbRatings(aggFiltered, type0);
     return res.json({ metas: aggFiltered, cacheMaxAge: 600 });
   }
   const type = req.params.type === 'series' ? 'series' : 'movie';

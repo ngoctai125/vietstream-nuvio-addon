@@ -230,7 +230,7 @@ const CONFIG = {
   proxyProviders: csv('PROXY_PROVIDERS', ['nguonc']),
   manifest: {
     id: 'community.vietstream',
-    version: process.env.VERSION || '1.4.2',
+    version: process.env.VERSION || '1.4.3',
     name: 'VietStream · Phim Việt',
     description:
       'Xem phim Việt với 7 danh mục gộp: Phim 4K, Phim lẻ, Phim bộ, Chiếu rạp, Hoạt hình, Thuyết Minh, Lồng Tiếng. Tương thích Nuvio & Stremio.'
