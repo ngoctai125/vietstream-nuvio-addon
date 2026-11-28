@@ -7,6 +7,7 @@ const { CONFIG, PROVIDERS } = require('./config');
 const CATALOG_DEFS = [];
 
 const AGG_CATALOGS = [
+  { type: 'movie', id: 'agg-hot-tuan', name: 'Phim hot tuần 🔥' },
   { type: 'movie', id: 'agg-4k', name: 'Phim 4K' },
   { type: 'movie', id: 'agg-phim-le', name: 'Phim lẻ' },
   { type: 'series', id: 'agg-phim-bo', name: 'Phim bộ' },

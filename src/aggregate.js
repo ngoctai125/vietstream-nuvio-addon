@@ -12,6 +12,8 @@ const KK = (PROVIDERS.kkphim && PROVIDERS.kkphim.apiUrl) || 'https://phimapi.com
 const VS = (PROVIDERS.phim4k && PROVIDERS.phim4k.apiUrl) || 'https://vsmov.com/api';
 
 const SRC = {
+  // Gộp nhiều nguồn phim mới/chiếu rạp + phim lẻ để có hàng "hot tuần" như app 4K.
+  'hot-tuan': { type: 'movie', sources: [['kk', 'phim-moi'], ['kk', 'phim-chieu-rap']] },
   'phim-le': { type: 'movie', sources: [['kk', 'phim-le'], ['vs', 'phim-le']] },
   'phim-bo': { type: 'series', sources: [['kk', 'phim-bo'], ['vs', 'phim-bo']] },
   'chieu-rap': { type: 'movie', sources: [['kk', 'phim-chieu-rap']] },
