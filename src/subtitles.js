@@ -203,36 +203,35 @@ async function translatedSrtFor(url) {
   }
 }
 
-// Trả danh sách phụ đề cho Stremio/Nuvio: giữ nguyên track gốc, thêm track Việt dịch
-// khi nguồn không có bản tiếng Việt.
+// Trả danh sách phụ đề cho Stremio/Nuvio: chỉ trả track tiếng Việt (bản thật nếu có,
+// ngược lại là bản dịch bám timeline). Track gốc đã do OpenSubtitles v3 phục vụ nên
+// không trả lại để tránh menu phụ đề bị nhân đôi.
 async function listSubtitles(type, id, extra, baseUrl) {
   const subs = await listFromOpenSubtitles(type, id, extra);
   const chosen = pickBaseSubtitle(subs);
-  const out = subs.filter((s) => s && s.url).map((s) => ({ ...s }));
+  if (!chosen) return [];
 
-  if (chosen) {
-    if (chosen.human) {
-      // Có bản Việt thật: đánh dấu lên đầu để người dùng thấy ngay.
-      const idx = out.findIndex((s) => s.url === chosen.sub.url);
-      if (idx > 0) out.unshift(out.splice(idx, 1)[0]);
-      return out;
-    }
-    const key = b64e(chosen.sub.url);
-    const fileName = `Vietsub (dịch) - ${chosen.sub.subtitleFileName || chosen.sub.movieReleaseName || 'phim'}`;
-    out.unshift({
-      id: `vi-auto-${chosen.sub.id || key}`,
-      url: `${baseUrl}/subvi/${key}.srt`,
-      lang: 'vi',
-      SubEncoding: 'UTF-8',
-      subtitleFileName: fileName,
-      movieReleaseName: chosen.sub.movieReleaseName || '',
-      releaseGroup: chosen.sub.releaseGroup || '',
-      fpsMilli: chosen.sub.fpsMilli || 0
-    });
-    // Dịch sẵn ở nền để lúc người dùng chọn là có ngay.
-    translatedSrtFor(chosen.sub.url).catch(() => {});
+  if (chosen.human) {
+    return [{
+      ...chosen.sub,
+      id: `vi-human-${chosen.sub.id || 'x'}`
+    }];
   }
-  return out;
+
+  const key = b64e(chosen.sub.url);
+  const fileName = `Vietsub (dịch) - ${chosen.sub.subtitleFileName || chosen.sub.movieReleaseName || 'phim'}`;
+  // Dịch sẵn ở nền để lúc người dùng chọn là có ngay.
+  translatedSrtFor(chosen.sub.url).catch(() => {});
+  return [{
+    id: `vi-auto-${chosen.sub.id || key}`,
+    url: `${baseUrl}/subvi/${key}.srt`,
+    lang: 'vi',
+    SubEncoding: 'UTF-8',
+    subtitleFileName: fileName,
+    movieReleaseName: chosen.sub.movieReleaseName || '',
+    releaseGroup: chosen.sub.releaseGroup || '',
+    fpsMilli: chosen.sub.fpsMilli || 0
+  }];
 }
 
 async function srtByKey(key) {
