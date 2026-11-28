@@ -457,6 +457,54 @@ async function imdbFallback(type, imdbId) {
   return null;
 }
 
+// Các provider torrent chỉ nhận IMDb ID — dùng cho bước bổ sung link bên dưới.
+const TORRENT_STREAM_PROVIDERS = new Set(['torrentio', 'comet', 'torrentsdb']);
+
+function pickImdbId(detail) {
+  if (!detail) return null;
+  const v = detail.imdbId || detail.imdb_id || (detail.imdb && detail.imdb.id);
+  return v && /^tt\d+$/.test(String(v)) ? String(v) : null;
+}
+
+// Tìm IMDb ID theo tên phim qua search của Cinemeta.
+async function cinemetaSearchImdb(type, name, year) {
+  if (!name) return null;
+  try {
+    const raw = await cached(`cinemetaSearch:${type}:${name}:${year || ''}`, 6 * 3600 * 1000, () =>
+      getJson(`${CONFIG.cinemetaUrl}/catalog/${type}/search/search=${encodeURIComponent(name)}.json`)
+    );
+    const metas = (raw && raw.metas) || [];
+    const want = String(name).toLowerCase();
+    const hit = metas.find((m) => String(m.name || '').toLowerCase() === want)
+      || metas.find((m) => String(m.name || '').toLowerCase().includes(want) && (!year || Number(m.year) === Number(year)));
+    return hit && /^tt\d+$/.test(String(hit.id)) ? hit.id : null;
+  } catch { return null; }
+}
+
+// Phim mở theo ID nguồn (kk_/nc_/hd_/k20_/p4k_) vẫn được dò thêm link torrent:
+// resolve IMDb từ detail của provider (hoặc search theo tên) rồi hỏi các provider torrent.
+async function enrichTorrentStreams(parsed, type) {
+  let detail = null;
+  try { detail = await parsed.provider.detail(parsed.slug); } catch { /* bỏ qua */ }
+  let imdbId = pickImdbId(detail);
+  if (!imdbId && detail) {
+    // Tên tiếng Việt thường không khớp Cinemeta — thử tên gốc (origin_name) trước.
+    const candidates = [detail.originalName, detail.name].filter(Boolean);
+    for (const title of candidates) {
+      imdbId = await cinemetaSearchImdb(type, title, detail.year);
+      if (imdbId) break;
+    }
+  }
+  if (!imdbId) return { results: [], detail };
+  const torrentCfgs = Object.values(PROVIDERS)
+    .filter((cfg) => cfg.enabled && TORRENT_STREAM_PROVIDERS.has(cfg.id) && !BLOCKED_STREAM_PROVIDERS.has(cfg.id));
+  const results = await Promise.all(torrentCfgs.map((cfg) => resolveProviderOutcome(providers[cfg.id], {
+    providerId: cfg.id, imdbId, title: detail && detail.name, year: detail && detail.year,
+    type, season: parsed.season, episode: parsed.episode
+  })));
+  return { results, detail };
+}
+
 // /stream/movie/tt123.json hoặc /stream/series/tt123:1:2.json
 router.get('/stream/:type/:id.json', async (req, res) => {
   const type = req.params.type === 'series' ? 'series' : 'movie';
@@ -474,6 +522,8 @@ router.get('/stream/:type/:id.json', async (req, res) => {
       if (BLOCKED_STREAM_PROVIDERS.has(parsed.provider.id)) {
         mergeProviderOutcomes(providerOutcomes, [{ providerId: parsed.provider.id, status: 'excluded', streams: [] }]);
       } else {
+        // Dò torrent song song ngay từ đầu để không kéo dài thời gian phản hồi.
+        const enrichPromise = enrichTorrentStreams(parsed, type);
         // ID nguồn dùng đúng slug, không tìm kiếm lại theo title.
         const direct = { providerId: parsed.provider.id, status: 'unknown', streams: [] };
         try {
@@ -485,11 +535,17 @@ router.get('/stream/:type/:id.json', async (req, res) => {
         }
         mergeProviderOutcomes(providerOutcomes, [direct]);
         streams = await filterBadStreams(streams, probeOutcomes);
+        // Ghép link torrent của cùng phim đó (nếu có) vào sheet nguồn.
+        let enrich = { results: [], detail: null };
+        try { enrich = await enrichPromise; } catch { /* bỏ qua */ }
+        mergeProviderOutcomes(providerOutcomes, enrich.results);
+        for (const result of enrich.results) streams.push(...result.streams);
         if (!streams.length) {
           try {
-            const d = await parsed.provider.detail(parsed.slug);
+            const d = enrich.detail || (await parsed.provider.detail(parsed.slug));
             if (d && d.name) {
-              const others = Object.values(PROVIDERS).filter((cfg) => cfg.enabled && cfg.id !== parsed.provider.id);
+              const others = Object.values(PROVIDERS).filter((cfg) => cfg.enabled
+                && cfg.id !== parsed.provider.id && !TORRENT_STREAM_PROVIDERS.has(cfg.id));
               const results = await Promise.all(others.map((cfg) => resolveProviderOutcome(providers[cfg.id], {
                 providerId: cfg.id, title: d.name, year: d.year, type,
                 season: parsed.season, episode: parsed.episode
