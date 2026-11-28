@@ -6,8 +6,8 @@ const { CONFIG } = require('../src/config');
 const { buildManifest, AGG_CATALOGS } = require('../src/manifest');
 
 test('addon manifest exposes patch version 1.4.2', () => {
-  assert.equal(CONFIG.manifest.version, '1.6.0');
-  assert.equal(buildManifest('https://addon.test').version, '1.6.0');
+  assert.equal(CONFIG.manifest.version, '1.6.1');
+  assert.equal(buildManifest('https://addon.test').version, '1.6.1');
 });
 
 test('addon manifest exposes hot-week catalog first and verified 4K second', () => {
@@ -15,6 +15,8 @@ test('addon manifest exposes hot-week catalog first and verified 4K second', () 
   const manifest = buildManifest('https://addon.test');
   assert.equal(manifest.catalogs[0].id, 'agg-hot-tuan');
   assert.equal(manifest.catalogs[0].name, 'Phim hot tuần 🔥');
-  assert.equal(manifest.catalogs[1].id, 'agg-4k');
-  assert.equal(manifest.catalogs[1].name, 'Phim 4K');
+  assert.equal(manifest.catalogs[1].id, 'agg-hay-nhat');
+  assert.equal(manifest.catalogs[1].name, 'Phim hay nhất ⭐');
+  assert.equal(manifest.catalogs[2].id, 'agg-4k');
+  assert.equal(manifest.catalogs[2].name, 'Phim 4K');
 });

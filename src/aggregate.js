@@ -115,7 +115,47 @@ function toMeta(it) {
   };
 }
 
+// Điểm IMDb (Cinemeta) để xếp hạng "Phim hay nhất"; cache 6 giờ theo id.
+async function imdbScore(imdbId) {
+  if (!/^tt\d+$/.test(String(imdbId || ''))) return 0;
+  try {
+    const raw = await cached(`imdbRating:${imdbId}`, 6 * 3600 * 1000, () =>
+      getJson(`${CONFIG.cinemetaUrl}/meta/movie/${imdbId}.json`, { timeout: 6000 })
+    );
+    const value = raw && raw.meta && raw.meta.imdbRating;
+    return value ? Number(value) : 0;
+  } catch {
+    return 0;
+  }
+}
+
 async function listCatalog(kind, extra = {}) {
+  // "Phim hay nhất": lấy ứng viên phim lẻ + chiếu rạp, chấm điểm IMDb (cache 6h)
+  // rồi xếp giảm dần — giống mục "PHIM HAY NHẤT" của app 4K.
+  if (kind === 'hay-nhat') {
+    const metaMap = new Map();
+    for (const [src, path] of [['kk', 'phim-le'], ['kk', 'phim-chieu-rap']]) {
+      try {
+        const items = await fetchKk(path, 1);
+        for (const it of items) {
+          const norm = kkItem(it, 'movie');
+          if (norm && norm.type === 'movie') merge(metaMap, norm);
+        }
+      } catch (e) {
+        console.warn('[aggregate]', src, path, e.message);
+      }
+    }
+    const candidates = Array.from(metaMap.values()).slice(0, 40);
+    const scored = await Promise.all(candidates.map(async (it) => ({
+      it,
+      score: await imdbScore(it.imdbId)
+    })));
+    return scored
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score || (b.it.year || 0) - (a.it.year || 0))
+      .slice(0, 20)
+      .map(({ it, score }) => ({ ...toMeta(it), imdbRating: String(score) }));
+  }
   // Danh mục 4K kiểm chứng sẵn: Cinemeta top đối chiếu Torrentio 2160p
   // (tools/build-4k-catalog.js). Không lấy quality từ listing Việt vì các
   // nguồn đó chỉ ghi FHD.
