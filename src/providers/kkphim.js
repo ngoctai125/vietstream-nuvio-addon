@@ -1,7 +1,8 @@
 'use strict';
 
 const BaseProvider = require('./base');
-const { getJson, stripHtml, mapImageUrl, parseEpNum, qualityFromText, cached } = require('../utils');
+const { getJson, stripHtml, mapImageUrl, parseEpNum, qualityFromText, cached, cachedOutcome } = require('../utils');
+const { ProviderOutcome } = require('./base');
 const { CONFIG } = require('../config');
 
 // Nguồn KKphim — API công khai tại https://phimapi.com
@@ -73,15 +74,24 @@ class KKphimProvider extends BaseProvider {
     };
   }
 
-  async search(q) {
-    if (!q) return [];
-    return cached(`kk:search:${q}`, 10 * 60 * 1000, async () => {
-      const data = await this.request(
-        `${this.cfg.apiUrl}/v1/api/tim-kiem?keyword=${encodeURIComponent(q)}&page=1&limit=24`
+  async searchOutcome(q, opts = {}) {
+    if (!q) return new ProviderOutcome('empty');
+    const outcome = await cachedOutcome(`kk:search:${q}`, 10 * 60 * 1000, async () => {
+      const result = await this.requestOutcome(
+        `${this.cfg.apiUrl}/v1/api/tim-kiem?keyword=${encodeURIComponent(q)}&page=1&limit=24`, opts
       );
-      const items = (data && data.data && data.data.items) || [];
-      return items.map((i) => this.normalizeItem(i, 'movie'));
+      if (result.status !== 'success') return result;
+      const data = result.value;
+      if (!data || !data.data || !Array.isArray(data.data.items)) return { status: 'failed', error: new Error('KKphim search malformed') };
+      return { status: 'success', value: data.data.items.map((i) => this.normalizeItem(i, 'movie')) };
     });
+    return outcome.status === 'success'
+      ? new ProviderOutcome(outcome.value.length ? 'ok' : 'empty', outcome.value)
+      : new ProviderOutcome(outcome.status, [], outcome.error);
+  }
+
+  async search(q, opts = {}) {
+    return (await this.searchOutcome(q, opts)).streams;
   }
 
   async listCatalog(kind, extra = {}) {
@@ -107,9 +117,9 @@ class KKphimProvider extends BaseProvider {
     return items.map((i) => this.toMeta(this.normalizeItem(i, CATALOG_ENDPOINTS[kind] ? CATALOG_ENDPOINTS[kind].type : 'movie')));
   }
 
-  async detail(slug) {
+  async detail(slug, opts = {}) {
     return cached(`kk:detail:${slug}`, 60 * 60 * 1000, async () => {
-      const data = await this.request(`${this.cfg.apiUrl}/phim/${encodeURIComponent(slug)}`);
+      const data = await this.request(`${this.cfg.apiUrl}/phim/${encodeURIComponent(slug)}`, opts);
       if (!data || !data.status || !data.movie) return null;
       const m = data.movie;
       const servers = (data.episodes || []).map((s) => ({

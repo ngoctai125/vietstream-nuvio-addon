@@ -31,6 +31,25 @@ test('K20 episode number uses title, explicit episode, then index', () => {
   assert.equal(episodeNumber({ title: 'Special' }, 4), 5);
 });
 
+test('K20 detail keeps advertised quality from metadata', async () => {
+  const provider = new K20Provider(cfg);
+  const slug = encodeNativeId('movie', 'vsmov:avengers-endgame');
+  provider.request = async (url) => {
+    assert.ok(url.includes('/meta/movie/'));
+    return {
+      meta: {
+        id: 'vsmov:avengers-endgame',
+        type: 'movie',
+        name: 'Avengers: Hồi Kết',
+        releaseInfo: '4K · Vietsub · 2019'
+      }
+    };
+  };
+
+  const detail = await provider.detail(slug);
+  assert.equal(detail.quality, '4K');
+});
+
 test('K20 series resolves the exact native video and preserves headers/subtitles', async () => {
   const provider = new K20Provider(cfg);
   const calls = [];

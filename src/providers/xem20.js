@@ -5,7 +5,8 @@ const { CookieJar } = require('tough-cookie');
 const cheerio = require('cheerio');
 const BaseProvider = require('./base');
 const { CONFIG } = require('../config');
-const { cached, detectAudio, parseEpNum, qualityFromText } = require('../utils');
+const { cached, cachedOutcome, detectAudio, parseEpNum, qualityFromText } = require('../utils');
+const { ProviderOutcome } = require('./base');
 
 function encodeSlug(slug) {
   return Buffer.from(String(slug || ''), 'utf8').toString('base64url');
@@ -199,8 +200,9 @@ class Xem20Provider extends BaseProvider {
   }
 
   async requestRaw(url, options = {}, timeout = CONFIG.timeout) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeout);
+    const ownsController = !options.signal;
+    const controller = ownsController ? new AbortController() : options.signal;
+    const timer = ownsController ? setTimeout(() => controller.abort(), timeout) : null;
     try {
       return await this.fetch(url, {
         redirect: 'follow',
@@ -209,13 +211,19 @@ class Xem20Provider extends BaseProvider {
         signal: controller.signal
       });
     } finally {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
     }
   }
 
   async requestText(url, options = {}, timeout = CONFIG.timeout) {
-    const response = await this.requestRaw(url, options, timeout);
-    return { response, text: await response.text() };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
+    try {
+      const response = await this.requestRaw(url, { ...options, signal: controller.signal }, timeout);
+      return { response, text: await response.text() };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async ensureLoggedIn(force = false) {
@@ -277,45 +285,73 @@ class Xem20Provider extends BaseProvider {
     };
   }
 
-  async search(query) {
+  async searchOutcome(query) {
     const clean = cleanQuery(query);
-    if (!clean || !(await this.ensureLoggedIn())) return [];
-    return (await cached(`x20:search:${clean.toLowerCase()}`, 30 * 60 * 1000, async () => {
-      const searchUrl = `${this.cfg.apiUrl}/tim-kiem?keyword=${encodeURIComponent(clean.toLowerCase())}`;
-      const result = await this.requestText(
-        searchUrl,
-        {},
-        this.cfg.searchTimeout || 8000
-      );
-      if (new URL(result.response.url || searchUrl).pathname === '/login') {
-        if (!(await this.ensureLoggedIn(true))) return [];
-        const retry = await this.requestText(
-          searchUrl,
-          {},
-          this.cfg.searchTimeout || 8000
-        );
-        return parseSearchHtml(retry.text, this.cfg.apiUrl);
+    if (!clean || !this.cfg.login || !this.cfg.password) return new ProviderOutcome('empty');
+    const outcome = await cachedOutcome(`x20:search:${clean.toLowerCase()}`, 30 * 60 * 1000, async () => {
+      try {
+        if (!(await this.ensureLoggedIn())) return { status: 'unknown', error: new Error('Xem20 login unavailable') };
+        const searchUrl = `${this.cfg.apiUrl}/tim-kiem?keyword=${encodeURIComponent(clean.toLowerCase())}`;
+        let result = await this.requestText(searchUrl, {}, this.cfg.searchTimeout || 8000);
+        if (new URL(result.response.url || searchUrl).pathname === '/login') {
+          await this.ensureLoggedIn(true);
+          result = await this.requestText(searchUrl, {}, this.cfg.searchTimeout || 8000);
+        }
+        if (!result.response.ok) {
+          const error = new Error(`Xem20 HTTP ${result.response.status}`);
+          error.status = result.response.status;
+          return { status: 'failed', error };
+        }
+        if (new URL(result.response.url || searchUrl).pathname === '/login') {
+          return { status: 'failed', error: new Error('Xem20 authentication failed') };
+        }
+        return { status: 'success', value: parseSearchHtml(result.text, this.cfg.apiUrl) };
+      } catch (error) {
+        return { status: require('../utils').classifyFetchError(error), error };
       }
-      return parseSearchHtml(result.text, this.cfg.apiUrl);
-    })) || [];
+    });
+    return outcome.status === 'success'
+      ? new ProviderOutcome(outcome.value.length ? 'ok' : 'empty', outcome.value)
+      : new ProviderOutcome(outcome.status, [], outcome.error);
   }
 
-  async resolveStream({ title, year, type = 'movie', season = 1, episode = 1 } = {}) {
-    const hits = await this.search(title);
-    const ranked = this.matchCandidates(hits, { title, year, type, season });
-    const targetYear = parseInt(year, 10);
-    const yearMatch = targetYear
-      ? hits.find((item) => item.year && Math.abs(parseInt(item.year, 10) - targetYear) <= 1)
-      : null;
-    const candidates = [...ranked];
-    for (const fallback of [yearMatch, hits[0]]) {
-      if (fallback && !candidates.some((item) => item.slug === fallback.slug)) candidates.push(fallback);
+  async search(query) {
+    return (await this.searchOutcome(query)).streams;
+  }
+
+  async resolveStreamWithOutcome({ title, year, type = 'movie', season = 1, episode = 1 } = {}) {
+    try {
+      const search = Object.prototype.hasOwnProperty.call(this, 'search')
+        ? await this.search(title).then((streams) => new ProviderOutcome(streams.length ? 'ok' : 'empty', streams))
+        : await this.searchOutcome(title);
+      if (!['ok', 'empty'].includes(search.status)) return new ProviderOutcome(search.status, [], search.error);
+      const hits = search.streams;
+      const ranked = this.matchCandidates(hits, { title, year, type, season });
+      const targetYear = parseInt(year, 10);
+      const yearMatch = targetYear
+        ? hits.find((item) => item.year && Math.abs(parseInt(item.year, 10) - targetYear) <= 1)
+        : null;
+      const candidates = [...ranked];
+      for (const fallback of [yearMatch, hits[0]]) {
+        if (fallback && !candidates.some((item) => item.slug === fallback.slug)) candidates.push(fallback);
+      }
+      for (const candidate of candidates.slice(0, 3)) {
+        try {
+          const streams = await this.streamsFromSlug(candidate.slug, type, season, episode);
+          if (streams.length) return new ProviderOutcome('ok', streams);
+        } catch (error) {
+          const status = require('../utils').classifyFetchError(error);
+          if (status !== 'unknown') return new ProviderOutcome(status, [], error);
+        }
+      }
+      return new ProviderOutcome(candidates.length ? 'unknown' : 'empty');
+    } catch (error) {
+      return new ProviderOutcome(require('../utils').classifyFetchError(error), [], error);
     }
-    for (const candidate of candidates.slice(0, 3)) {
-      const streams = await this.streamsFromSlug(candidate.slug, type, season, episode);
-      if (streams.length) return streams;
-    }
-    return [];
+  }
+
+  async resolveStream(args = {}) {
+    return (await this.resolveStreamWithOutcome(args)).streams;
   }
 
   async fetchDetail(nativeSlug, retryAuth = true) {

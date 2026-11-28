@@ -1,7 +1,8 @@
 'use strict';
 
 const BaseProvider = require('./base');
-const { getJson, getText, stripHtml, mapImageUrl, cached, parseEpNum } = require('../utils');
+const { getJson, getJsonOutcome, getText, stripHtml, mapImageUrl, cached, cachedOutcome, parseEpNum } = require('../utils');
+const { ProviderOutcome } = require('./base');
 
 // Nguồn NguonC — API công khai https://phim.nguonc.com/api
 // Một số phim trả m3u8 trực tiếp, một số chỉ có link embed StreamC
@@ -53,6 +54,19 @@ class NguoncProvider extends BaseProvider {
     return null;
   }
 
+  async requestOutcome(url, opts = {}) {
+    const attempts = [];
+    attempts.push(await getJsonOutcome(url, { headers: this.headers, ...opts }));
+    if (attempts[0].status === 'success') return attempts[0];
+    for (const fb of this.cfg.apiFallbacks || []) {
+      if (!url.startsWith(this.cfg.apiUrl)) break;
+      const result = await getJsonOutcome(url.replace(this.cfg.apiUrl, fb), { headers: this.headers, ...opts });
+      attempts.push(result);
+      if (result.status === 'success') return result;
+    }
+    return attempts.find((result) => result.status === 'failed') || attempts[0];
+  }
+
   toMeta(it) {
     return {
       id: `${this.prefix}${it.slug}`,
@@ -66,13 +80,21 @@ class NguoncProvider extends BaseProvider {
     };
   }
 
-  async search(q) {
-    if (!q) return [];
-    return cached(`nc:search:${q}`, 10 * 60 * 1000, async () => {
-      const data = await this.request(`${this.cfg.apiUrl}/films/search?keyword=${encodeURIComponent(q)}&page=1`);
-      const items = (data && data.items) || [];
-      return items.map(toMetaItem);
+  async searchOutcome(q) {
+    if (!q) return new ProviderOutcome('empty');
+    const outcome = await cachedOutcome(`nc:search:${q}`, 10 * 60 * 1000, async () => {
+      const result = await this.requestOutcome(`${this.cfg.apiUrl}/films/search?keyword=${encodeURIComponent(q)}&page=1`);
+      if (result.status !== 'success') return result;
+      if (!result.value || !Array.isArray(result.value.items)) return { status: 'failed', error: new Error('NguonC search malformed') };
+      return { status: 'success', value: result.value.items.map(toMetaItem) };
     });
+    return outcome.status === 'success'
+      ? new ProviderOutcome(outcome.value.length ? 'ok' : 'empty', outcome.value)
+      : new ProviderOutcome(outcome.status, [], outcome.error);
+  }
+
+  async search(q) {
+    return (await this.searchOutcome(q)).streams;
   }
 
   async listCatalog(kind, extra = {}) {

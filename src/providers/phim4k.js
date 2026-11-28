@@ -1,7 +1,8 @@
 'use strict';
 
 const BaseProvider = require('./base');
-const { stripHtml, mapImageUrl, cached, extractUrlParam, getText } = require('../utils');
+const { stripHtml, mapImageUrl, cached, cachedOutcome, extractUrlParam, getText } = require('../utils');
+const { ProviderOutcome } = require('./base');
 const { CONFIG } = require('../config');
 
 // Nguồn Phim4K — hệ VSMOV (vsmov.com/api), format tương tự OPhim.
@@ -41,13 +42,23 @@ class Phim4kProvider extends BaseProvider {
     };
   }
 
-  async search(q) {
-    if (!q) return [];
-    return cached(`p4k:search:${q}`, 10 * 60 * 1000, async () => {
-      const data = await this.request(`${this.cfg.apiUrl}/tim-kiem?keyword=${encodeURIComponent(q)}&page=1`);
-      const items = (data && data.items) || (data && data.data && data.data.items) || [];
-      return items.map((i) => this.normalizeItem(i, 'movie'));
+  async searchOutcome(q, opts = {}) {
+    if (!q) return new ProviderOutcome('empty');
+    const outcome = await cachedOutcome(`p4k:search:${q}`, 10 * 60 * 1000, async () => {
+      const result = await this.requestOutcome(`${this.cfg.apiUrl}/tim-kiem?keyword=${encodeURIComponent(q)}&page=1`, opts);
+      if (result.status !== 'success') return result;
+      const data = result.value;
+      const items = data && (data.items || (data.data && data.data.items));
+      if (!Array.isArray(items)) return { status: 'failed', error: new Error('Phim4K search malformed') };
+      return { status: 'success', value: items.map((i) => this.normalizeItem(i, 'movie')) };
     });
+    return outcome.status === 'success'
+      ? new ProviderOutcome(outcome.value.length ? 'ok' : 'empty', outcome.value)
+      : new ProviderOutcome(outcome.status, [], outcome.error);
+  }
+
+  async search(q, opts = {}) {
+    return (await this.searchOutcome(q, opts)).streams;
   }
 
   async listCatalog(kind, extra = {}) {
@@ -69,9 +80,9 @@ class Phim4kProvider extends BaseProvider {
     return wanted ? metas.filter((m) => m.type === wanted) : metas;
   }
 
-  async detail(slug) {
+  async detail(slug, opts = {}) {
     return cached(`p4k:detail:${slug}`, 60 * 60 * 1000, async () => {
-      const data = await this.request(`${this.cfg.apiUrl}/phim/${encodeURIComponent(slug)}`);
+      const data = await this.request(`${this.cfg.apiUrl}/phim/${encodeURIComponent(slug)}`, opts);
       if (!data) return null;
       const m = data.movie || (data.data && data.data.movie);
       if (!m) return null;

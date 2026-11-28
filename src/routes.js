@@ -5,10 +5,11 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { CONFIG, PROVIDERS } = require('./config');
 const cinemeta = require('./cinemeta');
-const { cached, getJson, getText, normTitle } = require('./utils');
+const { cached, cachedOutcome, getJson, getText, normTitle, qualityRank, qualityFromHlsText, parseHlsVariants, isFakeImagePlaylist, normalizeQuality, classifyFetchError, isHdrOrTenBit } = require('./utils');
 const { router: hlsRouter, getBaseUrl, b64e } = require('./hls-proxy');
 const { buildManifest, enabledProviders } = require('./manifest');
 const aggregate = require('./aggregate');
+const { recordStreamQuality, overlayStreamQuality } = require('./stream-quality');
 
 // ---------- Khởi tạo provider ----------
 const CTORS = {
@@ -20,7 +21,13 @@ const CTORS = {
   tophim: 'TophimProvider',
   hdvnn: 'HdvnnProvider',
   k20: 'K20Provider',
-  xem20: 'Xem20Provider'
+  xem20: 'Xem20Provider',
+  fshare: 'FshareProvider',
+  film4k: 'Film4kProvider',
+  xiaoya: 'XiaoyaProvider',
+  comet: 'CometProvider',
+  torrentio: 'TorrentioProvider',
+  torrentsdb: 'TorrentsDBProvider'
 };
 
 const providers = {};
@@ -114,7 +121,11 @@ function wrapProxy(stream, baseUrl) {
 function dedupe(streams) {
   const seen = new Set();
   return streams.filter((s) => {
-    const k = s.url || s.externalUrl;
+    const k = s.url || s.externalUrl || (
+      s.infoHash
+        ? `torrent:${String(s.infoHash).toLowerCase()}:${s.fileIdx ?? ''}:${(s.behaviorHints && s.behaviorHints.filename) || ''}`
+        : null
+    );
     if (!k || seen.has(k)) return false;
     seen.add(k);
     return true;
@@ -184,80 +195,227 @@ router.get('/', (req, res) => {
 const BAD_BODY_RE = /Thiếu signature|"error"\s*:|Could not resolve embed|Segment fetch failed/i;
 
 // Đọc playlist/segment kèm HTTP status: 5xx hoặc timeout (status 0) đều là hỏng.
-async function probeUrlText(url, headers) {
+async function probeUrlText(url, headers, timeoutMs = 10000) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 10000);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       redirect: 'follow',
       headers: { 'User-Agent': CONFIG.userAgent, ...headers, Range: 'bytes=0-40000' },
       signal: ctrl.signal
     });
-    return { status: res.status, txt: await res.text() };
-  } catch {
-    return { status: 0, txt: '' };
+    return { status: res.status, txt: await res.text(), outcome: 'ok' };
+  } catch (error) {
+    return { status: 0, txt: '', outcome: ctrl.signal.aborted || (error && error.name === 'AbortError') ? 'timeout' : 'failed' };
   } finally {
     clearTimeout(timer);
   }
 }
 
+async function validateVariantPlaylist(url, headers, depth = 0) {
+  const result = await probeUrlText(url, headers, 5000);
+  if (result.outcome === 'timeout') return { outcome: 'timeout', quality: null };
+  if (result.outcome !== 'ok' || result.status < 200 || result.status >= 300 || !result.txt) return { outcome: 'failed', quality: null };
+  if (!/^\s*#EXTM3U/i.test(result.txt) || BAD_BODY_RE.test(result.txt) || isFakeImagePlaylist(result.txt)) return { outcome: 'failed', quality: null };
+  const children = parseHlsVariants(result.txt);
+  if (children.length) {
+    if (depth >= 1) return { outcome: 'failed', quality: null };
+    const validated = await Promise.all(children.map(async (child) => {
+      let childUrl;
+      try { childUrl = new URL(child.url, url).href; } catch { return { outcome: 'failed', quality: null }; }
+      const playable = await validateVariantPlaylist(childUrl, headers, depth + 1);
+      return playable && playable.outcome === 'ok'
+        ? { ...playable, quality: playable.quality || child.quality }
+        : playable;
+    }));
+    const playable = validated.filter((item) => item.outcome === 'ok');
+    if (!playable.length) return {
+      outcome: validated.some((item) => item.outcome === 'timeout') ? 'timeout' : 'failed',
+      quality: null
+    };
+    return {
+      outcome: 'ok',
+      quality: playable.reduce((best, item) =>
+        item.quality && qualityRank(item.quality) > qualityRank(best) ? item.quality : best, null)
+    };
+  }
+  const segments = result.txt.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#'));
+  if (!segments.length) return { outcome: 'failed', quality: null };
+  return { outcome: 'ok', quality: qualityFromHlsText(result.txt) };
+}
+
 async function streamLooksBad(s) {
-  if (!s.url) return {
-    bad: !!(s.externalUrl && /embed\.php|\/embed\//i.test(s.externalUrl)),
-    probeOk: false,
-    latencyMs: Infinity
-  };
-  if (!/\.m3u8(\?|$)/i.test(s.url)) return { bad: false, probeOk: null, latencyMs: Infinity };
-  return cached('bad:' + s.url, 5 * 60 * 1000, async () => {
+  if (!s.url) {
+    if (s.externalUrl && /embed\.php|\/embed\//i.test(s.externalUrl)) {
+      return { bad: true, probeOk: false, latencyMs: Infinity, quality: null, outcome: 'failed' };
+    }
+    if (s.infoHash) {
+      const quality = normalizeQuality(`${s.name || ''} ${s.title || ''} ${(s.behaviorHints && s.behaviorHints.filename) || ''}`);
+      return { bad: false, probeOk: false, latencyMs: Infinity, quality, outcome: quality ? 'ok' : 'unknown' };
+    }
+    const quality = normalizeQuality(`${s.name || ''} ${s.title || ''}`);
+    return { bad: false, probeOk: false, latencyMs: Infinity, quality, outcome: quality ? 'ok' : 'unknown' };
+  }
+  if (!/\.m3u8(\?|$)/i.test(s.url)) {
+    const quality = normalizeQuality(`${s.name || ''} ${s.title || ''}`);
+    return { bad: false, probeOk: false, latencyMs: Infinity, quality, outcome: quality ? 'ok' : 'unknown' };
+  }
+  const outcome = await cachedOutcome('bad:' + s.url, 5 * 60 * 1000, async () => {
     const h = (s.behaviorHints && s.behaviorHints.proxyHeaders && s.behaviorHints.proxyHeaders.request) || {};
     const t0 = Date.now();
-    const { status, txt } = await probeUrlText(s.url, h);
+    const result = await probeUrlText(s.url, h);
+    const status = result.status;
+    const txt = result.txt;
     const latencyMs = Date.now() - t0;
-    if (status >= 500 || !txt) return { bad: true, probeOk: false, latencyMs };
-    if (BAD_BODY_RE.test(txt)) return { bad: true, probeOk: false, latencyMs };
+    const finish = (outcome, quality = null) => ({
+      status: 'success',
+      value: { bad: outcome === 'failed' || outcome === 'timeout', probeOk: outcome === 'ok', latencyMs, quality, outcome }
+    });
+    if (result.outcome === 'timeout') return finish('timeout');
+    if (result.outcome !== 'ok' || status < 200 || status >= 300 || !txt || !/^\s*#EXTM3U/i.test(txt)) return finish('failed');
+    if (BAD_BODY_RE.test(txt) || isFakeImagePlaylist(txt)) return finish('failed');
     const segs = txt.split(/\r?\n/).map((x) => x.trim()).filter((x) => x && !x.startsWith('#'));
-    if (segs.length >= 3) {
-      const png = segs.filter((x) => /\.png(\?|$)/i.test(x)).length;
-      if (png / segs.length > 0.8) return { bad: true, probeOk: false, latencyMs };
+    if (!segs.length) return finish('failed');
+    const variants = parseHlsVariants(txt);
+    let verifiedQuality = qualityFromHlsText(txt);
+    if (variants.length) {
+      const checked = await Promise.all(variants.map(async (variant) => {
+        let url;
+        try { url = new URL(variant.url, s.url).href; } catch { return { outcome: 'failed', quality: null }; }
+        const validated = await validateVariantPlaylist(url, h);
+        return validated && validated.outcome === 'ok'
+          ? { ...validated, quality: validated.quality || variant.quality }
+          : validated;
+      }));
+      const valid = checked.filter((item) => item.outcome === 'ok');
+      if (!valid.length) return finish(checked.some((item) => item.outcome === 'timeout') ? 'timeout' : 'failed');
+      verifiedQuality = valid.reduce((best, item) =>
+        item.quality && qualityRank(item.quality) > qualityRank(best) ? item.quality : best, null);
     }
-    // Playlist dạng proxy-segment: thử thêm đoạn đầu; lỗi ở đây cũng là stream hỏng.
     if (/proxy-segment/i.test(txt) && segs.length) {
       let first = null;
       try { first = new URL(segs[0], s.url).href; } catch { /* bỏ qua segment lạ */ }
       if (first) {
         const seg = await probeUrlText(first, h);
-        if (seg.status >= 500 || !seg.txt || BAD_BODY_RE.test(seg.txt)) {
-          return { bad: true, probeOk: false, latencyMs };
-        }
+        if (seg.outcome === 'timeout') return finish('timeout');
+        if (seg.outcome !== 'ok' || seg.status < 200 || seg.status >= 300 || !seg.txt || BAD_BODY_RE.test(seg.txt)) return finish('failed');
       }
     }
-    return { bad: false, probeOk: status > 0 && status < 500, latencyMs };
-  });
+    return finish(verifiedQuality ? 'ok' : 'unknown', verifiedQuality);
+  }, 30 * 1000);
+  return outcome.status === 'success' ? outcome.value : {
+    bad: outcome.status === 'failed', probeOk: false, latencyMs: Infinity,
+    quality: null, outcome: outcome.status
+  };
 }
 
 const BLOCKED_STREAM_PROVIDERS = new Set(
   String(process.env.STREAM_BLOCKLIST || 'phim4k').split(',').map((x) => x.trim()).filter(Boolean)
 );
 
-async function filterBadStreams(list) {
+async function resolveProviderOutcome(provider, args) {
+  if (BLOCKED_STREAM_PROVIDERS.has(provider && provider.id)) return { providerId: provider.id, status: 'excluded', streams: [] };
+  if (!provider) return { providerId: args.providerId || 'unknown', status: 'unknown', streams: [] };
+  try {
+    const result = typeof provider.resolveStreamWithOutcome === 'function'
+      ? await provider.resolveStreamWithOutcome(args)
+      : await provider.resolveStream(args);
+    if (result && typeof result.status === 'string') {
+      return { providerId: provider.id, status: result.status, streams: Array.isArray(result.streams) ? result.streams : [] };
+    }
+    if (!Array.isArray(result)) return { providerId: provider.id, status: 'unknown', streams: [] };
+    return { providerId: provider.id, status: result.length ? 'ok' : 'empty', streams: result };
+  } catch (error) {
+    return { providerId: provider.id, status: classifyFetchError(error), streams: [] };
+  }
+}
+
+function mergeProviderOutcomes(target, incoming) {
+  for (const next of incoming) {
+    const previous = target.find((item) => item.providerId === next.providerId);
+    if (!previous) target.push(next);
+    else if (previous.status !== 'ok' || next.status === 'ok') previous.status = next.status;
+    if (previous && next.streams.length) previous.streams = next.streams;
+  }
+}
+
+async function filterBadStreams(list, probeOutcomes = null) {
   const probes = await Promise.all(
     list.map((s) => {
-      if (BLOCKED_STREAM_PROVIDERS.has(s._providerId)) return { bad: true, probeOk: false, latencyMs: Infinity };
-      return streamLooksBad(s).catch(() => ({ bad: false, probeOk: false, latencyMs: Infinity }));
+      if (BLOCKED_STREAM_PROVIDERS.has(s._providerId)) return { bad: true, probeOk: false, latencyMs: Infinity, quality: null, outcome: 'excluded' };
+      return streamLooksBad(s).catch((error) => ({ bad: false, probeOk: false, latencyMs: Infinity, quality: null, outcome: classifyFetchError(error) }));
     })
   );
   const out = [];
+  if (probeOutcomes) {
+    list.forEach((stream, index) => probeOutcomes.push({
+      providerId: stream._providerId,
+      outcome: (probes[index] || {}).outcome || 'unknown'
+    }));
+  }
   list.forEach((s, i) => {
     const r = probes[i] || {};
     if (r.bad) return;
     // Tag chỉ dùng để sort; để non-enumerable nên JSON /stream không đổi.
     Object.defineProperties(s, {
       _probeOk: { value: !!r.probeOk, enumerable: false, configurable: true, writable: true },
-      _latencyMs: { value: Number.isFinite(r.latencyMs) ? r.latencyMs : Infinity, enumerable: false, configurable: true, writable: true }
+      _latencyMs: { value: Number.isFinite(r.latencyMs) ? r.latencyMs : Infinity, enumerable: false, configurable: true, writable: true },
+      _quality: { value: r.quality || null, enumerable: false, configurable: true, writable: true },
+      _outcome: { value: r.outcome || 'unknown', enumerable: false, configurable: true, writable: true }
     });
     out.push(s);
   });
   return out;
+}
+
+// Tìm metadata localized từ chính KKphim/Phim4K để phủ lên Cinemeta.
+// Cinemeta vẫn giữ episodes/cast; provider chỉ bổ sung tên, mô tả, ảnh và releaseInfo.
+async function localizedProviderMeta(type, imdbId, hint) {
+  if (!imdbId || !/^tt\d+$/.test(imdbId)) return { status: 'missing' };
+  const cacheKey = `localizedMeta:${type}:${String(imdbId).toLowerCase()}`;
+  const result = await cachedOutcome(cacheKey, 30 * 60 * 1000, async () => {
+    const sources = [providers.kkphim, providers.phim4k].filter(Boolean);
+    if (!sources.length) return { status: 'unavailable' };
+    const queries = Array.from(new Set([imdbId, hint && hint.name, hint && hint.originalName]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    try {
+      const results = await Promise.allSettled(sources.map(async (provider) => {
+        const groups = await Promise.allSettled(queries.map((query) => provider.searchOutcome(query, { signal: controller.signal })));
+        const searches = groups.filter((group) => group.status === 'fulfilled').map((group) => group.value);
+        const hits = searches.filter((search) => ['ok', 'empty'].includes(search.status)).flatMap((search) => search.streams || []);
+        const exact = hits.find((item) => String(item.imdbId || '').toLowerCase() === String(imdbId).toLowerCase());
+        const matched = hint ? provider.matchItem(hits, {
+          title: hint.name,
+          year: hint.year || hint.releaseInfo,
+          imdbId,
+          type,
+          season: 1
+        }) : null;
+        const candidates = exact ? [exact] : (matched ? [matched] : []);
+        for (const hit of candidates) {
+          if (!hit || !hit.slug) continue;
+          const detail = await provider.detail(hit.slug, { signal: controller.signal });
+          if (!detail || String(detail.imdbId || '').toLowerCase() !== String(imdbId).toLowerCase()) continue;
+          const meta = provider.buildMeta(detail, { withVideos: false });
+          if (meta) return { status: 'found', value: { ...meta, id: imdbId, imdb_id: imdbId, type } };
+        }
+        return searches.some((search) => ['failed', 'timeout', 'unknown'].includes(search.status))
+          ? { status: 'unavailable' }
+          : { status: 'missing' };
+      }));
+      const found = results.find((item) => item.status === 'fulfilled' && item.value.status === 'found');
+      if (found) return found.value;
+      return results.some((item) => item.status === 'rejected' || item.value.status === 'unavailable')
+        ? { status: 'unavailable' }
+        : { status: 'missing' };
+    } finally {
+      clearTimeout(timer);
+    }
+  }, 30 * 1000);
+  return result.status === 'found' ? result : { status: result.status === 'success' ? 'missing' : result.status };
 }
 
 // Tìm item cùng IMDb trong 6 catalog agg (cache dùng chung với /catalog),
@@ -272,7 +430,11 @@ async function imdbFallback(type, imdbId) {
   for (const r of agg) {
     if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
     const hit = r.value.find((m) => m && m.imdbId && String(m.imdbId).toLowerCase() === want);
-    if (hit && (hit.name || hit.originalName)) return hit;
+    if (hit && (hit.name || hit.originalName)) {
+      const localized = await localizedProviderMeta(type, imdbId, hit);
+      if (localized.status === 'found') return localized.value;
+      return hit;
+    }
   }
   const searched = await Promise.allSettled(
     Object.values(providers).map((p) => Promise.resolve().then(() => p.search(imdbId)))
@@ -301,43 +463,58 @@ router.get('/stream/:type/:id.json', async (req, res) => {
   const parsed = parseId(req.params.id);
   const base = getBaseUrl(req);
   let streams = [];
+  const probeOutcomes = [];
+  const providerOutcomes = Object.values(PROVIDERS).filter((cfg) => cfg.enabled).map((cfg) => ({
+    providerId: cfg.id,
+    status: BLOCKED_STREAM_PROVIDERS.has(cfg.id) ? 'excluded' : 'unknown',
+    streams: []
+  }));
   try {
     if (parsed && parsed.provider) {
-      // ID có prefix nguồn (kk_..., nc_...) -> lấy trực tiếp, không cần Cinemeta
-      streams = await parsed.provider.streamsFromSlug(parsed.slug, type, parsed.season, parsed.episode);
-      streams = await filterBadStreams(streams);
-      if (!streams.length) {
+      if (BLOCKED_STREAM_PROVIDERS.has(parsed.provider.id)) {
+        mergeProviderOutcomes(providerOutcomes, [{ providerId: parsed.provider.id, status: 'excluded', streams: [] }]);
+      } else {
+        // ID nguồn dùng đúng slug, không tìm kiếm lại theo title.
+        const direct = { providerId: parsed.provider.id, status: 'unknown', streams: [] };
         try {
-          const d = await parsed.provider.detail(parsed.slug);
-          if (d && d.name) {
-            const others = Object.values(providers).filter((p) => p.id !== parsed.provider.id);
-            const results = await Promise.allSettled(
-              others.map((p) => p.resolveStream({ title: d.name, year: d.year, type, season: parsed.season, episode: parsed.episode }))
-            );
-            for (const r of results) if (r.status === 'fulfilled' && Array.isArray(r.value)) streams.push(...r.value);
-          }
-        } catch { /* bỏ qua fallback */ }
+          streams = await parsed.provider.streamsFromSlug(parsed.slug, type, parsed.season, parsed.episode);
+          direct.streams = streams;
+          direct.status = streams.length ? 'ok' : 'empty';
+        } catch (error) {
+          direct.status = classifyFetchError(error);
+        }
+        mergeProviderOutcomes(providerOutcomes, [direct]);
+        streams = await filterBadStreams(streams, probeOutcomes);
+        if (!streams.length) {
+          try {
+            const d = await parsed.provider.detail(parsed.slug);
+            if (d && d.name) {
+              const others = Object.values(PROVIDERS).filter((cfg) => cfg.enabled && cfg.id !== parsed.provider.id);
+              const results = await Promise.all(others.map((cfg) => resolveProviderOutcome(providers[cfg.id], {
+                providerId: cfg.id, title: d.name, year: d.year, type,
+                season: parsed.season, episode: parsed.episode
+              })));
+              mergeProviderOutcomes(providerOutcomes, results);
+              for (const result of results) streams.push(...result.streams);
+            }
+          } catch { /* bỏ qua fallback */ }
+        }
       }
     } else if (parsed) {
-      // IMDb ID -> Cinemeta trước; thiếu tên hoặc không ra stream thì lấy
-      // title/year dự phòng từ 6 catalog agg / provider.search rồi vẫn gọi resolveStream.
       const meta = await cinemeta.getMeta(type, parsed.imdbId);
       const ask = async (name, year) => {
-        const results = await Promise.allSettled(
-          Object.values(providers).map((p) =>
-            p.resolveStream({
-              imdbId: parsed.imdbId,
-              title: name,
-              year,
-              type,
-              season: parsed.season,
-              episode: parsed.episode
-            })
-          )
-        );
-        for (const r of results) {
-          if (r.status === 'fulfilled' && Array.isArray(r.value)) streams.push(...r.value);
-        }
+        const active = Object.values(PROVIDERS).filter((cfg) => cfg.enabled && !BLOCKED_STREAM_PROVIDERS.has(cfg.id));
+        const results = await Promise.all(active.map((cfg) => resolveProviderOutcome(providers[cfg.id], {
+          providerId: cfg.id,
+          imdbId: parsed.imdbId,
+          title: name,
+          year,
+          type,
+          season: parsed.season,
+          episode: parsed.episode
+        })));
+        mergeProviderOutcomes(providerOutcomes, results);
+        for (const result of results) streams.push(...result.streams);
       };
       if (meta && meta.name) await ask(meta.name, meta.year);
       if (!streams.length) {
@@ -350,23 +527,37 @@ router.get('/stream/:type/:id.json', async (req, res) => {
     console.warn('[stream] lỗi:', e.message);
   }
   streams = applyAdScan(streams);
-  streams = dedupe(streams.map((s) => wrapProxy(s, base)));
-  streams = await filterBadStreams(streams);
-  const qrank = (x) => {
-    const t = String((x.name || '') + ' ' + (x.title || ''));
-    if (/4k|2160/i.test(t)) return 4;
-    if (/1080|fhd/i.test(t)) return 3;
-    if (/720/i.test(t)) return 2;
-    if (/360|480/i.test(t)) return 1;
-    return 0;
-  };
+  streams = dedupe(streams);
+  streams = await filterBadStreams(streams, probeOutcomes);
+  const qrank = (x) => qualityRank(x._quality || `${x.name || ''} ${x.title || ''}`);
   const latency = (x) => Number.isFinite(x._latencyMs) ? x._latencyMs : Number.MAX_SAFE_INTEGER;
-  const probeRank = (x) => x._probeOk === false ? 2 : x._probeOk === true ? 0 : 1;
+  const probeRank = (x) => {
+    if (!x.url && !x.externalUrl && x.infoHash) return 1;
+    return x._probeOk === false ? 2 : x._probeOk === true ? 0 : 1;
+  };
+  // Ưu tiên 4K lên đầu (chất lượng trước, rồi mới tới probe/latency),
+  // nhưng trong cùng mức 4K thì bản 8-bit SDR đứng trước 10-bit/HDR/DV vì
+  // Chromecast/emulator hay lỗi NO_EXCEEDS_CAPABILITIES với profile 10-bit.
+  const hdrRank = (x) => isHdrOrTenBit(`${(x.behaviorHints && x.behaviorHints.filename) || ''} ${x.title || ''} ${x.description || ''}`) ? 1 : 0;
+  // Trong cùng 4K SDR, nhiều seeder hơn = vào buffer nhanh hơn; torrent không
+  // có nhãn 👤 thì xếp sau các torrent có số liệu.
+  const seederRank = (x) => {
+    const match = String(x.title || '').match(/👤\s*([\d,]+)/u);
+    return match ? parseInt(match[1].replace(/,/g, ''), 10) || 0 : -1;
+  };
+  // TorrentsDB khai báo seeder cao nhưng đã gặp torrent chết (65/658 seeder
+  // nhưng 0 tốc độ); Torrentio kiểm chứng ổn định hơn. Giữ TDB làm dự phòng.
+  const providerRank = (x) => x._providerId === 'torrentio' ? 0 : x._providerId === 'torrentsdb' ? 2 : 1;
   streams.sort((a, b) =>
+    qrank(b) - qrank(a) ||
+    hdrRank(a) - hdrRank(b) ||
+    providerRank(a) - providerRank(b) ||
     probeRank(a) - probeRank(b) ||
-    latency(a) - latency(b) ||
-    qrank(b) - qrank(a)
+    seederRank(b) - seederRank(a) ||
+    latency(a) - latency(b)
   );
+  if (parsed && parsed.imdbId) recordStreamQuality(type, parsed.imdbId, streams, providerOutcomes, probeOutcomes);
+  streams = streams.map((stream) => wrapProxy(stream, base));
   res.json({ streams, cacheMaxAge: 600 });
 });
 
@@ -392,7 +583,10 @@ async function catalogSend(req, res) {
     const ex = req._extra || {};
     const aggKey = `agg:${aggKind}:${type0}:${ex.search || ''}|${ex.skip || 0}`;
     const aggMetas = await cached(aggKey, 10 * 60 * 1000, () => aggregate.listCatalog(aggKind, ex));
-    const aggFiltered = (aggMetas || []).filter((m) => m && m.id).filter((m) => !m.type || m.type === type0);
+    const cleanMetas = (aggMetas || []).filter((m) => m && m.id).filter((m) => !m.type || m.type === type0);
+    // agg-4k đã được kiểm chứng 2160p lúc sinh dữ liệu, nên giữ nguyên nhãn 4K;
+    // overlay thường sẽ bỏ quality chưa có entry /stream và làm mất badge.
+    const aggFiltered = aggKind === '4k' ? cleanMetas : overlayStreamQuality(cleanMetas, type0);
     return res.json({ metas: aggFiltered, cacheMaxAge: 600 });
   }
   const type = req.params.type === 'series' ? 'series' : 'movie';
@@ -430,15 +624,30 @@ router.get('/meta/:type/:id.json', async (req, res) => {
     return res.json({ meta, cacheMaxAge: 1800 });
   }
 
-  // IMDb ID -> trả nguyên meta Cinemeta (dùng khi app chưa có Cinemeta)
+  // IMDb ID -> giữ meta Cinemeta giàu dữ liệu, phủ metadata localized lên trên.
   const raw = await cached(`cinemetaRaw:${type}:${parsed.imdbId}`, 6 * 3600 * 1000, () =>
     getJson(`${CONFIG.cinemetaUrl}/meta/${type}/${parsed.imdbId}.json`)
   );
-  if (raw && raw.meta) return res.json({ meta: raw.meta, cacheMaxAge: 1800 });
+  if (raw && raw.meta) {
+    const localized = await localizedProviderMeta(type, parsed.imdbId, raw.meta);
+    const meta = { ...raw.meta };
+    if (localized.status === 'found') {
+      const found = localized.value;
+      for (const field of ['name', 'description', 'poster', 'background', 'logo', 'releaseInfo', 'country', 'language']) {
+        const value = found[field];
+        if (typeof value === 'string' && value.trim()) meta[field] = value;
+      }
+    }
+    meta.id = parsed.imdbId;
+    meta.imdb_id = parsed.imdbId;
+    meta.type = type;
+    return res.json({ meta, cacheMaxAge: 1800 });
+  }
   // Dự phòng trước khi 404: item cùng IMDb trong 6 catalog agg / provider.search.
   const fb = await imdbFallback(type, parsed.imdbId);
   if (fb) {
     const meta = {
+      ...fb,
       id: parsed.imdbId,
       imdb_id: parsed.imdbId,
       type,
@@ -455,3 +664,4 @@ router.get('/meta/:type/:id.json', async (req, res) => {
 });
 
 module.exports = router;
+module.exports._test = { streamLooksBad, resolveProviderOutcome, localizedProviderMeta, dedupe, validateVariantPlaylist };

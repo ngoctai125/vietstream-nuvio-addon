@@ -1,7 +1,8 @@
 'use strict';
 
 const BaseProvider = require('./base');
-const { stripHtml, cached, qualityFromText } = require('../utils');
+const { stripHtml, cached, cachedOutcome, qualityFromText } = require('../utils');
+const { ProviderOutcome } = require('./base');
 const { CONFIG } = require('../config');
 
 // Nguồn HDVNN (hdvnn.xyz) — site "Xem phim Thuyết Minh, Lồng Tiếng".
@@ -112,26 +113,40 @@ class HdvnnProvider extends BaseProvider {
     };
   }
 
-  async search(q) {
-    if (!q) return [];
-    return cached(`hd:search:${q}`, 10 * 60 * 1000, async () => {
-      const slug = querySlug(q);
-      const { res, text } = await fetchText(`${this.base}/tim-kiem/${encodeURIComponent(slug)}.html`, {
-        headers: this.headers
-      });
-      if (!res.ok || !text) return [];
-      const cheerio = require('cheerio');
-      const $ = cheerio.load(text);
-      const out = [];
-      const seen = new Set();
-      $('a[href*="/thong-tin-phim/"]').each((i, el) => {
-        const item = this.cardFrom($, el);
-        if (!item || seen.has(item.slug)) return;
-        seen.add(item.slug);
-        out.push(item);
-      });
-      return out;
+  async searchOutcome(q) {
+    if (!q) return new ProviderOutcome('empty');
+    const outcome = await cachedOutcome(`hd:search:${q}`, 10 * 60 * 1000, async () => {
+      try {
+        const slug = querySlug(q);
+        const { res, text } = await fetchText(`${this.base}/tim-kiem/${encodeURIComponent(slug)}.html`, { headers: this.headers });
+        if (!res.ok) {
+          const error = new Error(`HDVNN HTTP ${res.status}`);
+          error.status = res.status;
+          return { status: 'failed', error };
+        }
+        if (!text) return { status: 'failed', error: new Error('HDVNN empty search body') };
+        const cheerio = require('cheerio');
+        const $ = cheerio.load(text);
+        const out = [];
+        const seen = new Set();
+        $('a[href*="/thong-tin-phim/"]').each((i, el) => {
+          const item = this.cardFrom($, el);
+          if (!item || seen.has(item.slug)) return;
+          seen.add(item.slug);
+          out.push(item);
+        });
+        return { status: 'success', value: out };
+      } catch (error) {
+        return { status: require('../utils').classifyFetchError(error), error };
+      }
     });
+    return outcome.status === 'success'
+      ? new ProviderOutcome(outcome.value.length ? 'ok' : 'empty', outcome.value)
+      : new ProviderOutcome(outcome.status, [], outcome.error);
+  }
+
+  async search(q) {
+    return (await this.searchOutcome(q)).streams;
   }
 
   parseEpisodes($) {

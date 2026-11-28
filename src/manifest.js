@@ -7,6 +7,7 @@ const { CONFIG, PROVIDERS } = require('./config');
 const CATALOG_DEFS = [];
 
 const AGG_CATALOGS = [
+  { type: 'movie', id: 'agg-4k', name: 'Phim 4K' },
   { type: 'movie', id: 'agg-phim-le', name: 'Phim lẻ' },
   { type: 'series', id: 'agg-phim-bo', name: 'Phim bộ' },
   { type: 'movie', id: 'agg-chieu-rap', name: 'Chiếu rạp' },
@@ -29,6 +30,17 @@ function buildManifest(baseUrl) {
     name: c.name,
     extra: [{ name: 'search' }, { name: 'skip' }]
   }));
+
+  for (const provider of on) {
+    for (const c of provider.catalogs || []) {
+      catalogs.push({
+        type: c.type,
+        id: `${provider.id}-${c.id}`,
+        name: c.name,
+        extra: [{ name: 'search' }, { name: 'skip' }]
+      });
+    }
+  }
 
   const names = on.map((p) => p.name).join(' · ');
   return {

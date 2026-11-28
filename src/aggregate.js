@@ -1,7 +1,8 @@
 'use strict';
 
-const { getJson, mapImageUrl, normTitle, cached } = require('./utils');
+const { getJson, mapImageUrl, normTitle, cached, normalizeQuality, qualityRank } = require('./utils');
 const { PROVIDERS, CONFIG } = require('./config');
+const TOP_4K = require('./data/top-4k.json');
 
 // Catalog gộp theo MỤC PHIM, không theo nguồn.
 // Chỉ lấy item có IMDb ID để Nuvio dùng Cinemeta làm meta,
@@ -19,6 +20,14 @@ const SRC = {
   'long-tieng': { type: 'series', sources: [['vs', 'long-tieng']] }
 };
 
+function resolveItemType(item, fallbackType) {
+  if (item.tmdb && item.tmdb.type === 'tv') return 'series';
+  if (item.tmdb && item.tmdb.type === 'movie') return 'movie';
+  if (['series', 'hoathinh', 'tvshows', 'tv'].includes(item.type)) return 'series';
+  if (['single', 'movie'].includes(item.type)) return 'movie';
+  return fallbackType;
+}
+
 function kkItem(it, type) {
   const imdb = it.imdb && it.imdb.id;
   if (!imdb) return null;
@@ -27,20 +36,23 @@ function kkItem(it, type) {
     name: it.name,
     originalName: it.origin_name,
     year: parseInt(it.year, 10) || null,
-    type,
+    type: resolveItemType(it, type),
     poster: mapImageUrl(it.poster_url, 'https://phimimg.com'),
     background: mapImageUrl(it.thumb_url, 'https://phimimg.com'),
-    quality: it.quality || null,
+    quality: normalizeQuality(it.quality),
     lang: it.lang || null,
     modified: it.modified && it.modified.time,
     sources: ['KKPhim']
   };
 }
 
-function vsItem(it, fallbackType, kind) {
+function vsItem(it, fallbackType, kind, strictAudio = false) {
   const imdb = it.imdb && it.imdb.id;
   if (!imdb) return null;
-  const type = it.tmdb && it.tmdb.type === 'tv' ? 'series' : fallbackType;
+  const type = resolveItemType(it, fallbackType);
+  const categoryAudio = kind === 'thuyet-minh' ? 'Thuyết Minh' : kind === 'long-tieng' ? 'Lồng Tiếng' : null;
+  const lang = it.lang || (!strictAudio ? categoryAudio : null);
+  if (strictAudio && categoryAudio && !normTitle(lang).includes(normTitle(categoryAudio))) return null;
   return {
     imdbId: imdb,
     name: it.name,
@@ -49,8 +61,8 @@ function vsItem(it, fallbackType, kind) {
     type,
     poster: mapImageUrl(it.poster_url, null),
     background: mapImageUrl(it.thumb_url, null),
-    quality: null,
-    lang: kind === 'thuyet-minh' ? 'Thuyết Minh' : kind === 'long-tieng' ? 'Lồng Tiếng' : null,
+    quality: normalizeQuality(it.quality),
+    lang,
     modified: it.modified && it.modified.time,
     sources: ['Phim4K']
   };
@@ -81,25 +93,10 @@ function merge(map, item) {
   const key = String(item.imdbId).toLowerCase();
   const cur = map.get(key);
   if (!cur) { map.set(key, item); return; }
-  if (!cur.quality && item.quality) cur.quality = item.quality;
+  if (qualityRank(item.quality) > qualityRank(cur.quality)) cur.quality = item.quality;
   if (!cur.lang && item.lang) cur.lang = item.lang;
   if (!cur.poster && item.poster) cur.poster = item.poster;
   for (const s of item.sources || []) if (!cur.sources.includes(s)) cur.sources.push(s);
-}
-
-function rank(q) {
-  if (/4k|2160/i.test(String(q || ''))) return 4;
-  if (/fhd|1080/i.test(String(q || ''))) return 3;
-  if (/hd|720/i.test(String(q || ''))) return 2;
-  return 1;
-}
-
-function normalizeQuality(q) {
-  const s = String(q || '');
-  if (/2160|4k/i.test(s)) return '4K';
-  if (/fhd|1080/i.test(s)) return 'FHD';
-  if (/hd|720/i.test(s)) return 'HD';
-  return null;
 }
 
 function toMeta(it) {
@@ -117,33 +114,65 @@ function toMeta(it) {
 }
 
 async function listCatalog(kind, extra = {}) {
+  // Danh mục 4K kiểm chứng sẵn: Cinemeta top đối chiếu Torrentio 2160p
+  // (tools/build-4k-catalog.js). Không lấy quality từ listing Việt vì các
+  // nguồn đó chỉ ghi FHD.
+  if (kind === '4k') {
+    const query = normTitle(extra.search || '');
+    const skip = Math.max(0, parseInt(extra.skip, 10) || 0);
+    return (TOP_4K.items || [])
+      .filter((item) => !query || normTitle(item.name).includes(query))
+      .slice(skip, skip + 20)
+      .map((item) => ({
+        id: item.imdbId,
+        type: 'movie',
+        name: item.name,
+        poster: item.poster || undefined,
+        posterShape: 'poster',
+        background: item.background || item.poster || undefined,
+        releaseInfo: ['4K', item.year].filter(Boolean).join(' · '),
+        year: item.year || undefined,
+        imdbId: item.imdbId
+      }));
+  }
   const def = SRC[kind];
   if (!def) return [];
   const page = Math.max(1, Math.floor((parseInt(extra.skip, 10) || 0) / 20) + 1);
   const metaMap = new Map();
 
-  for (const [src, path] of def.sources) {
-    try {
-      const items = src === 'kk' ? await fetchKk(path, page) : await fetchVs(path, page);
-      for (const it of items) {
-        const norm = src === 'kk' ? kkItem(it, def.type) : vsItem(it, def.type, kind);
-        if (norm && norm.type === def.type) merge(metaMap, norm);
-      }
-    } catch (e) {
-      console.warn('[aggregate]', src, path, e.message);
-    }
-  }
-
-  if (!metaMap.size && extra.search) {
+  if (extra.search) {
     const q = String(extra.search);
-    const [a, b] = await Promise.allSettled([searchKk(q), searchVs(q)]);
-    if (a.status === 'fulfilled') for (const it of a.value) merge(metaMap, kkItem(it, def.type));
-    if (b.status === 'fulfilled') for (const it of b.value) merge(metaMap, vsItem(it, def.type, kind));
+    const results = await Promise.allSettled(def.sources.map(async ([src]) => {
+      const items = src === 'kk' ? await searchKk(q) : await searchVs(q);
+      return items
+        .map((it) => src === 'kk' ? kkItem(it, def.type) : vsItem(it, def.type, kind, true))
+        .filter(Boolean);
+    }));
+    results.forEach((result, index) => {
+      const src = def.sources[index][0];
+      if (result.status === 'fulfilled') {
+        for (const item of result.value) if (item.type === def.type) merge(metaMap, item);
+      } else {
+        console.warn('[aggregate]', src, 'search', result.reason && result.reason.message);
+      }
+    });
+  } else {
+    for (const [src, path] of def.sources) {
+      try {
+        const items = src === 'kk' ? await fetchKk(path, page) : await fetchVs(path, page);
+        for (const it of items) {
+          const norm = src === 'kk' ? kkItem(it, def.type) : vsItem(it, def.type, kind);
+          if (norm && norm.type === def.type) merge(metaMap, norm);
+        }
+      } catch (e) {
+        console.warn('[aggregate]', src, path, e.message);
+      }
+    }
   }
 
   return Array.from(metaMap.values())
     .filter((it) => it.type === def.type)
-    .sort((a, b) => rank(b.quality) - rank(a.quality) || (b.year || 0) - (a.year || 0))
+    .sort((a, b) => qualityRank(b.quality) - qualityRank(a.quality) || (b.year || 0) - (a.year || 0))
     .slice(0, 20)
     .map(toMeta);
 }

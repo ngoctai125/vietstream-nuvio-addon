@@ -2,7 +2,8 @@
 
 const BaseProvider = require('./base');
 const utils = require('../utils');
-const { cached, detectAudio, parseEpNum, qualityFromText } = utils;
+const { cached, cachedOutcome, detectAudio, parseEpNum, qualityFromText } = utils;
+const { ProviderOutcome } = require('./base');
 const { CONFIG } = require('../config');
 
 const K20_SOURCES = ['nguonc', 'hh3d', 'stp', 'vsmov', 'yan'];
@@ -84,14 +85,40 @@ class K20Provider extends BaseProvider {
     return ((data && data.metas) || []).map((meta) => this.normalizeMeta(meta, type));
   }
 
-  async searchType(query, type) {
-    if (!query) return [];
-    return (await cached(`k20:search:${type}:${query}`, 10 * 60 * 1000, async () => {
+  async fetchCatalogOutcome(type, catalogId, extra = {}) {
+    let suffix = '';
+    if (extra.search) suffix = `/search=${encodeURIComponent(extra.search)}.json`;
+    else if (parseInt(extra.skip, 10) > 0) suffix = `/skip=${parseInt(extra.skip, 10)}.json`;
+    else suffix = '.json';
+    const result = await this.requestOutcome(`${this.cfg.apiUrl}/catalog/${type}/${catalogId}${suffix}`);
+    if (result.status !== 'success') return result;
+    if (!result.value || !Array.isArray(result.value.metas)) return { status: 'failed', error: new Error('K20 catalog malformed') };
+    return { status: 'success', value: result.value.metas.map((meta) => this.normalizeMeta(meta, type)) };
+  }
+
+  async searchTypeOutcome(query, type) {
+    if (!query) return new ProviderOutcome('empty');
+    const outcome = await cachedOutcome(`k20:search:${type}:${query}`, 10 * 60 * 1000, async () => {
       const results = await Promise.allSettled(
-        this.catalogIds(type).map((catalogId) => this.fetchCatalog(type, catalogId, { search: query }))
+        this.catalogIds(type).map((catalogId) => this.fetchCatalogOutcome(type, catalogId, { search: query }))
       );
-      return this.mergeItems(results);
-    })) || [];
+      const merged = this.mergeItems(results.map((result) => result.status === 'fulfilled'
+        ? { status: 'fulfilled', value: result.value.value || [] }
+        : result));
+      if (merged.length) return { status: 'success', value: merged };
+      const error = results.find((result) => result.status === 'rejected' ||
+        (result.value && ['failed', 'timeout', 'unknown'].includes(result.value.status)));
+      if (!error) return { status: 'success', value: [] };
+      if (error.status === 'rejected') return { status: utils.classifyFetchError(error.reason), error: error.reason };
+      return error.value;
+    });
+    return outcome.status === 'success'
+      ? new ProviderOutcome(outcome.value.length ? 'ok' : 'empty', outcome.value)
+      : new ProviderOutcome(outcome.status, [], outcome.error);
+  }
+
+  async searchType(query, type) {
+    return (await this.searchTypeOutcome(query, type)).streams;
   }
 
   async search(query) {
@@ -128,24 +155,40 @@ class K20Provider extends BaseProvider {
     return this.mergeItems(results).map((item) => this.toMeta(item));
   }
 
-  async resolveStream({ title, year, type = 'movie', season = 1, episode = 1 } = {}) {
-    const mediaType = type === 'series' ? 'series' : 'movie';
-    const hits = await this.searchType(title, mediaType);
-    const ranked = this.matchCandidates(hits, { title, year, type: mediaType, season });
-    const targetYear = parseInt(year, 10);
-    const yearMatch = targetYear
-      ? hits.find((item) => item.year && Math.abs(parseInt(item.year, 10) - targetYear) <= 1)
-      : null;
-    const candidates = [...ranked];
-    for (const fallback of [yearMatch, hits[0]]) {
-      if (fallback && !candidates.some((item) => item.slug === fallback.slug)) candidates.push(fallback);
+  async resolveStreamWithOutcome({ title, year, type = 'movie', season = 1, episode = 1 } = {}) {
+    try {
+      const mediaType = type === 'series' ? 'series' : 'movie';
+      const search = Object.prototype.hasOwnProperty.call(this, 'searchType')
+        ? await this.searchType(title, mediaType).then((streams) => new ProviderOutcome(streams.length ? 'ok' : 'empty', streams))
+        : await this.searchTypeOutcome(title, mediaType);
+      if (!['ok', 'empty'].includes(search.status)) return new ProviderOutcome(search.status, [], search.error);
+      const hits = search.streams;
+      const ranked = this.matchCandidates(hits, { title, year, type: mediaType, season });
+      const targetYear = parseInt(year, 10);
+      const yearMatch = targetYear
+        ? hits.find((item) => item.year && Math.abs(parseInt(item.year, 10) - targetYear) <= 1)
+        : null;
+      const candidates = [...ranked];
+      for (const fallback of [yearMatch, hits[0]]) {
+        if (fallback && !candidates.some((item) => item.slug === fallback.slug)) candidates.push(fallback);
+      }
+      for (const candidate of candidates.slice(0, 3)) {
+        try {
+          const streams = await this.streamsFromSlug(candidate.slug, mediaType, season, episode);
+          if (streams.length) return new ProviderOutcome('ok', streams);
+        } catch (error) {
+          const status = utils.classifyFetchError(error);
+          if (status !== 'unknown') return new ProviderOutcome(status, [], error);
+        }
+      }
+      return new ProviderOutcome(candidates.length ? 'unknown' : 'empty');
+    } catch (error) {
+      return new ProviderOutcome(utils.classifyFetchError(error), [], error);
     }
+  }
 
-    for (const candidate of candidates.slice(0, 3)) {
-      const streams = await this.streamsFromSlug(candidate.slug, mediaType, season, episode);
-      if (streams.length) return streams;
-    }
-    return [];
+  async resolveStream(args = {}) {
+    return (await this.resolveStreamWithOutcome(args)).streams;
   }
 
   async detail(slug) {
@@ -178,7 +221,7 @@ class K20Provider extends BaseProvider {
         originalName: meta.name,
         year: parseEpNum(meta.releaseInfo),
         type: native.type,
-        quality: 'Auto',
+        quality: qualityFromText(meta.releaseInfo, 'Auto'),
         lang: '',
         poster: meta.poster,
         background: meta.background || meta.poster,

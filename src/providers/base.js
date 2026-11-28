@@ -2,6 +2,9 @@
 
 const {
   getJson,
+  getJsonOutcome,
+  cachedOutcome,
+  classifyFetchError,
   normTitle,
   parseEpNum,
   detectAudio,
@@ -16,6 +19,17 @@ const {
  * Mỗi provider cần cài: search(q), listCatalog(kind, extra), detail(slug)
  * và có thể ghi đè resolveStream / extractStreamItem / buildMeta.
  */
+class ProviderOutcome {
+  constructor(status, streams = [], error = null) {
+    this.status = status;
+    this.streams = Array.isArray(streams) ? streams : [];
+    if (error) this.error = error;
+  }
+
+  static from(status, value, error) {
+    return new ProviderOutcome(status, Array.isArray(value) ? value : [], error);
+  }
+}
 class BaseProvider {
   constructor(cfg) {
     this.id = cfg.id;
@@ -34,6 +48,44 @@ class BaseProvider {
 
   async request(url, opts = {}) {
     return getJson(url, { headers: this.headers, ...opts });
+  }
+
+  async requestOutcome(url, opts = {}) {
+    return getJsonOutcome(url, { headers: this.headers, ...opts });
+  }
+
+  async searchOutcome(q, opts = {}) {
+    try {
+      const hits = await this.search(q, opts);
+      if (!Array.isArray(hits)) return new ProviderOutcome('unknown');
+      return new ProviderOutcome(hits.length ? 'ok' : 'empty', hits);
+    } catch (error) {
+      return new ProviderOutcome(classifyFetchError(error), [], error);
+    }
+  }
+
+  // Adapter outcome-aware cho provider chưa ghi đè resolveStreamWithOutcome.
+  async resolveStreamWithOutcome(args = {}) {
+    try {
+      const search = await this.searchOutcome(args.title);
+      if (!['ok', 'empty'].includes(search.status)) return new ProviderOutcome(search.status, [], search.error);
+      const cands = this.matchCandidates(search.streams, args);
+      let attempted = false;
+      for (const it of cands.slice(0, 3)) {
+        attempted = true;
+        try {
+          const streams = await this.streamsFromSlug(it.slug, args.type, args.season, args.episode);
+          if (Array.isArray(streams) && streams.length) return new ProviderOutcome('ok', streams);
+        } catch (error) {
+          const status = classifyFetchError(error);
+          if (status !== 'unknown') return new ProviderOutcome(status, [], error);
+        }
+      }
+      // Không suy ra empty từ detail/search bị provider nuốt lỗi thành null/[].
+      return new ProviderOutcome(attempted ? 'unknown' : 'empty');
+    } catch (error) {
+      return new ProviderOutcome(classifyFetchError(error), [], error);
+    }
   }
 
   // ---------- Tìm & so khớp ----------
@@ -162,17 +214,9 @@ class BaseProvider {
       });
   }
 
-  // Luồng mặc định: search -> xếp hạng ứng viên -> thử từng ứng viên cho tới khi có stream
-  async resolveStream({ imdbId, title, year, type, season, episode }) {
-    const hits = await this.search(title);
-    const cands = this.matchCandidates(hits, { title, year, imdbId, type, season });
-    for (const it of cands.slice(0, 3)) {
-      try {
-        const streams = await this.streamsFromSlug(it.slug, type, season, episode);
-        if (streams.length) return streams;
-      } catch { /* thử ứng viên kế tiếp */ }
-    }
-    return [];
+  // Adapter giữ tương thích caller cũ; route dùng resolveStreamWithOutcome.
+  async resolveStream(args = {}) {
+    return (await this.resolveStreamWithOutcome(args)).streams;
   }
 
   // Xây danh sách stream từ detail đã chuẩn hoá
@@ -220,3 +264,4 @@ class BaseProvider {
 }
 
 module.exports = BaseProvider;
+module.exports.ProviderOutcome = ProviderOutcome;
