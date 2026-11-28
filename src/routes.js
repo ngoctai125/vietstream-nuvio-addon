@@ -8,6 +8,7 @@ const cinemeta = require('./cinemeta');
 const { cached, cachedOutcome, getJson, getText, normTitle, qualityRank, qualityFromHlsText, parseHlsVariants, isFakeImagePlaylist, normalizeQuality, classifyFetchError, isHdrOrTenBit } = require('./utils');
 const { router: hlsRouter, getBaseUrl, b64e } = require('./hls-proxy');
 const subtitles = require('./subtitles');
+const TOP_4K = require('./data/top-4k.json');
 const { buildManifest, enabledProviders } = require('./manifest');
 const aggregate = require('./aggregate');
 const { recordStreamQuality, overlayStreamQuality } = require('./stream-quality');
@@ -546,7 +547,7 @@ async function enrichImdbRatings(metas, type) {
     await Promise.all(pending.slice(i, i + CHUNK).map(async (m) => {
       try {
         const raw = await cached(`imdbRating:${m.id}`, 6 * 3600 * 1000, () =>
-          getJson(`${CONFIG.cinemetaUrl}/meta/${type}/${m.id}.json`));
+          getJson(`${CONFIG.cinemetaUrl}/meta/${type}/${m.id}.json`, { timeout: 5000 }));
         const rating = raw && raw.meta && raw.meta.imdbRating;
         if (rating) m.imdbRating = String(rating);
       } catch { /* thiếu rating thì thôi, không chặn catalog */ }
@@ -703,6 +704,29 @@ async function catalogSend(req, res) {
     // agg-4k đã được kiểm chứng 2160p lúc sinh dữ liệu, nên giữ nguyên nhãn 4K;
     // overlay thường sẽ bỏ quality chưa có entry /stream và làm mất badge.
     const aggFiltered = aggKind === '4k' ? cleanMetas : overlayStreamQuality(cleanMetas, type0);
+    // Không còn hàng "Phim 4K" riêng: gộp phim 4K đã kiểm chứng vào Phim lẻ (nối sau
+    // phim Việt, giữ nhãn 4K vì overlay ở trên sẽ xoá quality của các item này).
+    if (aggKind === 'phim-le' && !ex.search) {
+      const seen = new Set(aggFiltered.map((m) => String(m.id)));
+      let added = 0;
+      for (const item of TOP_4K.items || []) {
+        if (added >= 20) break;
+        if (!item.imdbId || seen.has(String(item.imdbId))) continue;
+        seen.add(String(item.imdbId));
+        added += 1;
+        aggFiltered.push({
+          id: item.imdbId,
+          type: 'movie',
+          name: item.name,
+          poster: item.poster || undefined,
+          posterShape: 'poster',
+          background: item.background || item.poster || undefined,
+          releaseInfo: ['4K', item.year].filter(Boolean).join(' · '),
+          year: item.year || undefined,
+          imdbId: item.imdbId
+        });
+      }
+    }
     await enrichImdbRatings(aggFiltered, type0);
     return res.json({ metas: aggFiltered, cacheMaxAge: 600 });
   }
