@@ -25,9 +25,9 @@ function sizeBytes(stream) {
   const match = String(stream.title || stream.description || '').match(/💾\s*([\d.,]+)\s*(TB|GB|MB)/i);
   if (!match) return 0;
   const value = parseFloat(match[1].replace(/,/g, '.'));
-  if (/tb/i.test(match[2])) return value * 1_000_000_000_000;
-  if (/gb/i.test(match[2])) return value * 1_000_000_000;
-  return value * 1_000_000;
+  if (/tb/i.test(match[2])) return Math.round(value * 1_000_000_000_000);
+  if (/gb/i.test(match[2])) return Math.round(value * 1_000_000_000);
+  return Math.round(value * 1_000_000);
 }
 
 function filename(stream) {
@@ -95,7 +95,7 @@ class TorrentioProvider extends BaseProvider {
       behaviorHints: {
         bingeGroup: `torrentio|2160p|${stream.infoHash}`,
         filename: name,
-        videoSize: size
+        videoSize: Math.round(size || 0)
       },
       sources: Array.from(new Set([...original, ...TRACKERS]))
     };

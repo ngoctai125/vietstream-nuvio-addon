@@ -81,7 +81,7 @@ class CometProvider extends BaseProvider {
       behaviorHints: {
         bingeGroup: `comet|2160p|${stream.infoHash}`,
         filename,
-        videoSize: size
+        videoSize: Math.round(size || 0)
       },
       sources: Array.from(new Set([
         ...(Array.isArray(stream.sources) ? stream.sources.filter((source) => typeof source === 'string') : []),

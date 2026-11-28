@@ -634,6 +634,16 @@ router.get('/stream/:type/:id.json', async (req, res) => {
   );
   if (parsed && parsed.imdbId) recordStreamQuality(type, parsed.imdbId, streams, providerOutcomes, probeOutcomes);
   streams = streams.map((stream) => wrapProxy(stream, base));
+  // App bind videoSize kiểu Long: số thực (vd 4190000000.0000005) làm cả sheet nguồn
+  // báo lỗi parse. Ép nguyên cho mọi provider, kể cả stream lấy từ upstream.
+  streams.forEach((stream) => {
+    const hints = stream && stream.behaviorHints;
+    if (hints && hints.videoSize != null) {
+      const size = Math.round(Number(hints.videoSize));
+      hints.videoSize = Number.isFinite(size) && size > 0 ? size : undefined;
+      if (hints.videoSize === undefined) delete hints.videoSize;
+    }
+  });
   res.json({ streams, cacheMaxAge: 600 });
 });
 

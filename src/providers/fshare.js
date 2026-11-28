@@ -323,7 +323,7 @@ class FshareProvider extends BaseProvider {
     stream.behaviorHints = {
       ...stream.behaviorHints,
       filename: file.name,
-      videoSize: size || undefined
+      videoSize: size ? Math.round(size) : undefined
     };
     return [stream];
   }
