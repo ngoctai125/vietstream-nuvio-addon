@@ -726,6 +726,10 @@ async function catalogSend(req, res) {
           imdbId: item.imdbId
         });
       }
+      // Xếp lại: 4K lên đầu (đã kiểm chứng), sau đó tới phim Việt theo năm.
+      aggFiltered.sort((a, b) =>
+        qualityRank(b.releaseInfo) - qualityRank(a.releaseInfo) ||
+        (parseInt(b.year, 10) || 0) - (parseInt(a.year, 10) || 0));
     }
     await enrichImdbRatings(aggFiltered, type0);
     return res.json({ metas: aggFiltered, cacheMaxAge: 600 });

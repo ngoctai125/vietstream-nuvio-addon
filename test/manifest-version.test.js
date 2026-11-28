@@ -6,8 +6,8 @@ const { CONFIG } = require('../src/config');
 const { buildManifest, AGG_CATALOGS } = require('../src/manifest');
 
 test('addon manifest exposes patch version 1.4.2', () => {
-  assert.equal(CONFIG.manifest.version, '1.7.0');
-  assert.equal(buildManifest('https://addon.test').version, '1.7.0');
+  assert.equal(CONFIG.manifest.version, '1.7.1');
+  assert.equal(buildManifest('https://addon.test').version, '1.7.1');
 });
 
 test('addon manifest exposes hot-week catalog first and verified 4K second', () => {
